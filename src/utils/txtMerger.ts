@@ -60,68 +60,46 @@ export const parseTXT = (file: File): Promise<ParsedTXT> => {
   });
 };
 
-export const mergeTXTData = (
-  data1: any[],
-  data2: any[],
-  skuColumn1: string,
-  skuColumn2: string
+export const mergeMultipleTXTData = (
+  materialData: any[],
+  additionalFiles: { data: any[]; skuColumn: string; fileName: string }[]
 ): any[] => {
   const mergedData: any[] = [];
-  const data2Map = new Map();
   
-  // Crea una mappa dei dati del secondo file usando il SKU come chiave
-  data2.forEach(row => {
-    const sku = row[skuColumn2];
-    if (sku) {
-      data2Map.set(sku, row);
-    }
-  });
-  
-  // Processa i dati del primo file
-  data1.forEach(row1 => {
-    const sku = row1[skuColumn1];
-    if (!sku) return;
-    
-    const row2 = data2Map.get(sku);
-    
-    if (row2) {
-      // Merge delle righe - rinomina le colonne duplicate
-      const mergedRow: any = {};
-      
-      // Aggiungi colonne dal primo file
-      Object.keys(row1).forEach(key => {
-        mergedRow[`File1_${key}`] = row1[key];
-      });
-      
-      // Aggiungi colonne dal secondo file
-      Object.keys(row2).forEach(key => {
-        const newKey = Object.keys(row1).includes(key) && key !== skuColumn1 
-          ? `File2_${key}` 
-          : key;
-        mergedRow[newKey] = row2[key];
-      });
-      
-      // Aggiungi una colonna SKU unificata
-      mergedRow['SKU'] = sku;
-      
-      mergedData.push(mergedRow);
-      data2Map.delete(sku); // Rimuovi per evitare duplicati
-    } else {
-      // SKU presente solo nel primo file
-      const mergedRow: any = { SKU: sku };
-      Object.keys(row1).forEach(key => {
-        mergedRow[`File1_${key}`] = row1[key];
-      });
-      mergedData.push(mergedRow);
-    }
-  });
-  
-  // Aggiungi le righe del secondo file che non hanno match
-  data2Map.forEach((row2, sku) => {
-    const mergedRow: any = { SKU: sku };
-    Object.keys(row2).forEach(key => {
-      mergedRow[`File2_${key}`] = row2[key];
+  // Create maps for each additional file
+  const fileMaps = additionalFiles.map(file => {
+    const map = new Map();
+    file.data.forEach(row => {
+      const sku = row[file.skuColumn];
+      if (sku) {
+        map.set(sku.toString().trim(), row);
+      }
     });
+    return { map, fileName: file.fileName };
+  });
+  
+  // Process each product in the material file
+  materialData.forEach(materialRow => {
+    const materialSku = materialRow['SKU'] || materialRow['sku'] || materialRow['Sku'] || Object.values(materialRow)[0];
+    if (!materialSku) return;
+    
+    const skuKey = materialSku.toString().trim();
+    const mergedRow: any = { ...materialRow };
+    
+    // Add data from each additional file
+    fileMaps.forEach(({ map, fileName }, index) => {
+      const additionalRow = map.get(skuKey);
+      if (additionalRow) {
+        Object.keys(additionalRow).forEach(key => {
+          // Avoid overwriting existing columns, prefix with file identifier
+          const newKey = mergedRow.hasOwnProperty(key) && key !== additionalFiles[index].skuColumn
+            ? `${fileName}_${key}`
+            : key;
+          mergedRow[newKey] = additionalRow[key];
+        });
+      }
+    });
+    
     mergedData.push(mergedRow);
   });
   
