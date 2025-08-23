@@ -1,7 +1,7 @@
-import CatalogManager from '@/components/CatalogManager';
+import CatalogProcessor from '@/components/CatalogProcessor';
 
 const Index = () => {
-  return <CatalogManager />;
+  return <CatalogProcessor />;
 };
 
 export default Index;
