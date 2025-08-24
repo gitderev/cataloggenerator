@@ -1,7 +1,7 @@
-import ElaboratoreCatalogo from '@/components/ElaboratoreCatalogo';
+import AltersideCatalogGenerator from '@/components/AltersideCatalogGenerator';
 
 const Index = () => {
-  return <ElaboratoreCatalogo />;
+  return <AltersideCatalogGenerator />;
 };
 
 export default Index;

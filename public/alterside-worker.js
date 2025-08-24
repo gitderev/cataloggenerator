@@ -1,4 +1,4 @@
-// processingWorker.ts
+// alterside-worker.js - Advanced processing for Alterside Catalog Generator
 import Papa from 'papaparse';
 
 interface FileData {
@@ -18,6 +18,11 @@ interface ProcessedRecord {
   IVA: string;
   'ListPrice con IVA': number;
   'CustBestPrice con IVA': number;
+  'Costo di spedizione': number;
+  'Fee Mediaworld': string;
+  'Fee Alterside': string;
+  'Prezzo finale': number;
+  'Prezzo finale Listino': number;
 }
 
 interface LogEntry {
@@ -38,12 +43,17 @@ interface ProcessingProgress {
   totalRecords?: number;
 }
 
-// Half-up rounding to 2 decimals
-function roundHalfUp(num: number): number {
+// Helper functions
+function roundHalfUp(num) {
   return Math.round((num + Number.EPSILON) * 100) / 100;
 }
 
-function isNumeric(value: any): boolean {
+function ceilToXX99(num) {
+  const floored = Math.floor(num);
+  return floored + 0.99;
+}
+
+function isNumeric(value) {
   return !isNaN(parseFloat(value)) && isFinite(value);
 }
 
@@ -60,13 +70,14 @@ self.onmessage = function(e) {
   }
 };
 
-function processFiles(files: { material: FileData; stock: FileData; price: FileData }) {
-  const logs: LogEntry[] = [];
-  const processed: ProcessedRecord[] = [];
+function processFiles(files) {
+  const logsEAN = [];
+  const logsManufPartNr = [];
+  const processedEAN = [];
+  const processedManufPartNr = [];
   
   // Progress tracking
-  let currentProgress = 0;
-  const updateProgress = (stage: string, progress: number, extra?: any) => {
+  const updateProgress = (stage, progress, extra = {}) => {
     self.postMessage({
       type: 'progress',
       stage,
@@ -78,12 +89,12 @@ function processFiles(files: { material: FileData; stock: FileData; price: FileD
   updateProgress('Inizializzazione', 5);
 
   // Create lookup maps for performance
-  const stockMap = new Map<string, any>();
-  const priceMap = new Map<string, any>();
+  const stockMap = new Map();
+  const priceMap = new Map();
   
   // Track duplicates
-  const stockDuplicates = new Set<string>();
-  const priceDuplicates = new Set<string>();
+  const stockDuplicates = new Set();
+  const priceDuplicates = new Set();
 
   updateProgress('Creazione indici stock', 15);
   
@@ -93,15 +104,17 @@ function processFiles(files: { material: FileData; stock: FileData; price: FileD
     if (matnr) {
       if (stockMap.has(matnr)) {
         stockDuplicates.add(matnr);
-        logs.push({
+        const duplicateLog = {
           source_file: 'StockFileData',
-          line: index + 2, // +2 because header is line 1, data starts at line 2
+          line: index + 2,
           Matnr: matnr,
           ManufPartNr: record.ManufPartNr || '',
           EAN: record.EAN || '',
-          reason: 'duplicato',
+          reason: 'duplicate_matnr_stock',
           details: 'Matnr duplicato nel file stock - mantenuto il primo'
-        });
+        };
+        logsEAN.push(duplicateLog);
+        logsManufPartNr.push(duplicateLog);
       } else {
         stockMap.set(matnr, record);
       }
@@ -116,15 +129,17 @@ function processFiles(files: { material: FileData; stock: FileData; price: FileD
     if (matnr) {
       if (priceMap.has(matnr)) {
         priceDuplicates.add(matnr);
-        logs.push({
+        const duplicateLog = {
           source_file: 'pricefileData',
           line: index + 2,
           Matnr: matnr,
           ManufPartNr: record.ManufPartNr || '',
           EAN: record.EAN || '',
-          reason: 'duplicato',
+          reason: 'duplicate_matnr_price',
           details: 'Matnr duplicato nel file prezzi - mantenuto il primo'
-        });
+        };
+        logsEAN.push(duplicateLog);
+        logsManufPartNr.push(duplicateLog);
       } else {
         priceMap.set(matnr, record);
       }
@@ -147,21 +162,54 @@ function processFiles(files: { material: FileData; stock: FileData; price: FileD
 
     const matnr = materialRecord.Matnr?.toString().trim();
     if (!matnr) {
-      logs.push({
+      const emptyMatnrLog = {
         source_file: 'MaterialFile',
         line: index + 2,
         Matnr: '',
         ManufPartNr: materialRecord.ManufPartNr || '',
         EAN: materialRecord.EAN || '',
-        reason: 'Matnr vuoto',
+        reason: 'matnr_empty',
         details: 'Codice materiale mancante'
-      });
+      };
+      logsEAN.push(emptyMatnrLog);
+      logsManufPartNr.push(emptyMatnrLog);
       return;
     }
 
     // Get related records
     const stockRecord = stockMap.get(matnr);
     const priceRecord = priceMap.get(matnr);
+
+    // Check for missing joins
+    if (!stockRecord) {
+      const missingStockLog = {
+        source_file: 'MaterialFile',
+        line: index + 2,
+        Matnr: matnr,
+        ManufPartNr: materialRecord.ManufPartNr || '',
+        EAN: materialRecord.EAN || '',
+        reason: 'join_missing_stock',
+        details: 'Matnr non trovato nel file stock'
+      };
+      logsEAN.push(missingStockLog);
+      logsManufPartNr.push(missingStockLog);
+      return;
+    }
+
+    if (!priceRecord) {
+      const missingPriceLog = {
+        source_file: 'MaterialFile',
+        line: index + 2,
+        Matnr: matnr,
+        ManufPartNr: materialRecord.ManufPartNr || '',
+        EAN: materialRecord.EAN || '',
+        reason: 'join_missing_price',
+        details: 'Matnr non trovato nel file prezzi'
+      };
+      logsEAN.push(missingPriceLog);
+      logsManufPartNr.push(missingPriceLog);
+      return;
+    }
 
     // Combine data
     const combined = {
@@ -170,82 +218,120 @@ function processFiles(files: { material: FileData; stock: FileData; price: FileD
       ...priceRecord
     };
 
-    // Apply filters
-    const ean = combined.EAN?.toString().trim();
-    if (!ean) {
-      logs.push({
-        source_file: 'MaterialFile',
-        line: index + 2,
-        Matnr: matnr,
-        ManufPartNr: combined.ManufPartNr || '',
-        EAN: '',
-        reason: 'EAN vuoto',
-        details: 'Campo EAN mancante o vuoto'
-      });
-      return;
-    }
-
+    // Common filters
     const existingStock = combined.ExistingStock;
-    if (!isNumeric(existingStock) || parseFloat(existingStock) <= 0) {
-      logs.push({
+    if (!isNumeric(existingStock) || parseFloat(existingStock) <= 1) {
+      const stockLog = {
         source_file: 'MaterialFile',
         line: index + 2,
         Matnr: matnr,
         ManufPartNr: combined.ManufPartNr || '',
-        EAN: ean,
-        reason: 'ExistingStock non valido',
-        details: `ExistingStock: ${existingStock} (deve essere > 0)`
-      });
+        EAN: combined.EAN || '',
+        reason: 'stock_leq_1',
+        details: `ExistingStock: ${existingStock} (deve essere > 1)`
+      };
+      logsEAN.push(stockLog);
+      logsManufPartNr.push(stockLog);
       return;
     }
 
     const listPrice = combined.ListPrice;
     if (!isNumeric(listPrice)) {
-      logs.push({
+      const priceLog = {
         source_file: 'MaterialFile',
         line: index + 2,
         Matnr: matnr,
         ManufPartNr: combined.ManufPartNr || '',
-        EAN: ean,
-        reason: 'ListPrice non valido',
+        EAN: combined.EAN || '',
+        reason: 'price_missing',
         details: `ListPrice: ${listPrice} (deve essere numerico)`
-      });
+      };
+      logsEAN.push(priceLog);
+      logsManufPartNr.push(priceLog);
       return;
     }
 
     const custBestPrice = combined.CustBestPrice;
     if (!custBestPrice || custBestPrice.toString().trim() === '' || !isNumeric(custBestPrice)) {
-      logs.push({
+      const custLog = {
         source_file: 'MaterialFile',
         line: index + 2,
         Matnr: matnr,
         ManufPartNr: combined.ManufPartNr || '',
-        EAN: ean,
-        reason: 'CustBestPrice non valido',
+        EAN: combined.EAN || '',
+        reason: 'custbest_missing',
         details: `CustBestPrice: ${custBestPrice} (deve essere presente e numerico)`
-      });
+      };
+      logsEAN.push(custLog);
+      logsManufPartNr.push(custLog);
       return;
     }
 
-    // Calculate prices with IVA (22%)
+    // Calculate prices according to specifications
+    const custBestPriceCeil = Math.ceil(parseFloat(custBestPrice));
     const listPriceNum = parseFloat(listPrice);
-    const custBestPriceNum = parseFloat(custBestPrice);
+    
+    // IVA calculations
     const listPriceWithIVA = roundHalfUp(listPriceNum * 1.22);
-    const custBestPriceWithIVA = roundHalfUp(custBestPriceNum * 1.22);
+    const custBestPriceWithIVA = roundHalfUp(custBestPriceCeil * 1.22);
+    
+    // Final price calculations
+    // From CustBestPrice: ((((CustBestPrice_ceil × 1,22) + 5) × 1,07) × 1,05) with ceil to xx,99
+    const finalPriceBest = ceilToXX99(((custBestPriceWithIVA + 5) * 1.07) * 1.05);
+    
+    // From ListPrice: ceil(((ListPrice × 1,22) + 5) × 1,07) × 1,05)
+    const finalPriceListino = Math.ceil(((listPriceWithIVA + 5) * 1.07) * 1.05);
 
-    // Create processed record
-    processed.push({
+    // Create base record
+    const baseRecord = {
       Matnr: matnr,
       ManufPartNr: combined.ManufPartNr || '',
-      EAN: ean,
+      EAN: combined.EAN?.toString().trim() || '',
       ShortDescription: combined.ShortDescription || '',
       ExistingStock: parseInt(existingStock),
       ListPrice: listPriceNum,
-      CustBestPrice: custBestPriceNum,
+      CustBestPrice: custBestPriceCeil,
       IVA: '22%',
       'ListPrice con IVA': listPriceWithIVA,
-      'CustBestPrice con IVA': custBestPriceWithIVA
-    });
+      'CustBestPrice con IVA': custBestPriceWithIVA,
+      'Costo di spedizione': 5,
+      'Fee Mediaworld': '7%',
+      'Fee Alterside': '5%',
+      'Prezzo finale': finalPriceBest,
+      'Prezzo finale Listino': finalPriceListino
+    };
+
+    // EAN export filter
+    const ean = baseRecord.EAN;
+    if (!ean) {
+      logsEAN.push({
+        source_file: 'MaterialFile',
+        line: index + 2,
+        Matnr: matnr,
+        ManufPartNr: baseRecord.ManufPartNr,
+        EAN: '',
+        reason: 'ean_empty',
+        details: 'Campo EAN mancante o vuoto per export EAN'
+      });
+    } else {
+      processedEAN.push(baseRecord);
+    }
+
+    // ManufPartNr export filter
+    const manufPartNr = baseRecord.ManufPartNr;
+    if (!manufPartNr) {
+      logsManufPartNr.push({
+        source_file: 'MaterialFile',
+        line: index + 2,
+        Matnr: matnr,
+        ManufPartNr: '',
+        EAN: baseRecord.EAN,
+        reason: 'manufpartnr_empty',
+        details: 'Campo ManufPartNr mancante o vuoto per export ManufPartNr'
+      });
+    } else {
+      processedManufPartNr.push(baseRecord);
+    }
   });
 
   updateProgress('Finalizzazione', 95);
@@ -253,8 +339,10 @@ function processFiles(files: { material: FileData; stock: FileData; price: FileD
   // Calculate statistics
   const stats = {
     totalRecords: files.material.data.length,
-    validRecords: processed.length,
-    filteredRecords: logs.length,
+    validRecordsEAN: processedEAN.length,
+    validRecordsManufPartNr: processedManufPartNr.length,
+    filteredRecordsEAN: logsEAN.length,
+    filteredRecordsManufPartNr: logsManufPartNr.length,
     stockDuplicates: stockDuplicates.size,
     priceDuplicates: priceDuplicates.size
   };
@@ -264,8 +352,10 @@ function processFiles(files: { material: FileData; stock: FileData; price: FileD
   // Send results
   self.postMessage({
     type: 'complete',
-    processedData: processed,
-    logEntries: logs,
+    processedDataEAN: processedEAN,
+    processedDataManufPartNr: processedManufPartNr,
+    logEntriesEAN: logsEAN,
+    logEntriesManufPartNr: logsManufPartNr,
     stats
   });
-};
+}

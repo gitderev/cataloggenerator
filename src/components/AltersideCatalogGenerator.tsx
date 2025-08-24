@@ -29,6 +29,11 @@ interface ProcessedRecord {
   IVA: string;
   'ListPrice con IVA': number;
   'CustBestPrice con IVA': number;
+  'Costo di spedizione': number;
+  'Fee Mediaworld': string;
+  'Fee Alterside': string;
+  'Prezzo finale': number;
+  'Prezzo finale Listino': number;
 }
 
 interface LogEntry {
@@ -43,8 +48,10 @@ interface LogEntry {
 
 interface ProcessingStats {
   totalRecords: number;
-  validRecords: number;
-  filteredRecords: number;
+  validRecordsEAN: number;
+  validRecordsManufPartNr: number;
+  filteredRecordsEAN: number;
+  filteredRecordsManufPartNr: number;
   stockDuplicates: number;
   priceDuplicates: number;
 }
@@ -55,7 +62,7 @@ const REQUIRED_HEADERS = {
   price: ['Matnr', 'ManufPartNr', 'ListPrice', 'CustBestPrice']
 };
 
-const ElaboratoreCatalogo: React.FC = () => {
+const AltersideCatalogGenerator: React.FC = () => {
   const [files, setFiles] = useState<FileUploadState>({
     material: { file: null, status: 'none' },
     stock: { file: null, status: 'none' },
@@ -65,8 +72,10 @@ const ElaboratoreCatalogo: React.FC = () => {
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState({ stage: '', progress: 0, recordsProcessed: 0, totalRecords: 0 });
   const [processingTime, setProcessingTime] = useState({ started: 0, elapsed: 0, estimated: 0 });
-  const [processedData, setProcessedData] = useState<ProcessedRecord[]>([]);
-  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [processedDataEAN, setProcessedDataEAN] = useState<ProcessedRecord[]>([]);
+  const [processedDataManufPartNr, setProcessedDataManufPartNr] = useState<ProcessedRecord[]>([]);
+  const [logEntriesEAN, setLogEntriesEAN] = useState<LogEntry[]>([]);
+  const [logEntriesManufPartNr, setLogEntriesManufPartNr] = useState<LogEntry[]>([]);
   const [stats, setStats] = useState<ProcessingStats | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
@@ -192,7 +201,7 @@ const ElaboratoreCatalogo: React.FC = () => {
 
     try {
       // Create Web Worker
-      workerRef.current = new Worker('/processingWorker.js');
+      workerRef.current = new Worker('/alterside-worker.js');
       
       workerRef.current.onmessage = (e) => {
         const { type, ...data } = e.data;
@@ -208,13 +217,15 @@ const ElaboratoreCatalogo: React.FC = () => {
             break;
             
           case 'complete':
-            setProcessedData(data.processedData);
-            setLogEntries(data.logEntries);
+            setProcessedDataEAN(data.processedDataEAN);
+            setProcessedDataManufPartNr(data.processedDataManufPartNr);
+            setLogEntriesEAN(data.logEntriesEAN);
+            setLogEntriesManufPartNr(data.logEntriesManufPartNr);
             setStats(data.stats);
             
             toast({
               title: "Elaborazione completata",
-              description: `${data.processedData.length} record validi elaborati`
+              description: `EAN: ${data.processedDataEAN.length} record | ManufPartNr: ${data.processedDataManufPartNr.length} record`
             });
             
             setProcessing(false);
@@ -259,9 +270,7 @@ const ElaboratoreCatalogo: React.FC = () => {
     }
   };
 
-  const downloadExcel = () => {
-    if (processedData.length === 0) return;
-
+  const getTimestamp = () => {
     const now = new Date();
     const romeTime = new Intl.DateTimeFormat('it-IT', {
       timeZone: 'Europe/Rome',
@@ -276,20 +285,34 @@ const ElaboratoreCatalogo: React.FC = () => {
     const [day, month, year] = date.split('/');
     const [hour, minute] = time.split(':');
     
-    const timestamp = `${year}${month}${day}_${hour}${minute}`;
-    const sheetName = `${year}-${month}-${day}`;
-    const filename = `catalogo_${timestamp}.xlsx`;
+    return {
+      timestamp: `${year}${month}${day}_${hour}${minute}`,
+      sheetName: `${year}-${month}-${day}`
+    };
+  };
 
-    // Format data for Excel with proper number formatting
-    const excelData = processedData.map(record => ({
+  const formatExcelData = (data: ProcessedRecord[]) => {
+    return data.map(record => ({
       ...record,
       ExistingStock: record.ExistingStock.toString(),
       ListPrice: record.ListPrice.toFixed(2).replace('.', ','),
-      CustBestPrice: record.CustBestPrice.toFixed(2).replace('.', ','),
+      CustBestPrice: record.CustBestPrice.toString(),
       'ListPrice con IVA': record['ListPrice con IVA'].toFixed(2).replace('.', ','),
-      'CustBestPrice con IVA': record['CustBestPrice con IVA'].toFixed(2).replace('.', ',')
+      'CustBestPrice con IVA': record['CustBestPrice con IVA'].toFixed(2).replace('.', ','),
+      'Costo di spedizione': record['Costo di spedizione'].toString(),
+      'Prezzo finale': record['Prezzo finale'].toFixed(2).replace('.', ','),
+      'Prezzo finale Listino': record['Prezzo finale Listino'].toString()
     }));
+  };
 
+  const downloadExcel = (type: 'ean' | 'manufpartnr') => {
+    const data = type === 'ean' ? processedDataEAN : processedDataManufPartNr;
+    if (data.length === 0) return;
+
+    const { timestamp, sheetName } = getTimestamp();
+    const filename = `catalogo_${type}_${timestamp}.xlsx`;
+
+    const excelData = formatExcelData(data);
     const ws = XLSX.utils.json_to_sheet(excelData);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -301,52 +324,27 @@ const ElaboratoreCatalogo: React.FC = () => {
     });
   };
 
-  const downloadLog = () => {
-    if (logEntries.length === 0 && !stats) return;
+  const downloadLog = (type: 'ean' | 'manufpartnr') => {
+    const logs = type === 'ean' ? logEntriesEAN : logEntriesManufPartNr;
+    if (logs.length === 0 && !stats) return;
 
-    const now = new Date();
-    const romeTime = new Intl.DateTimeFormat('it-IT', {
-      timeZone: 'Europe/Rome',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).format(now);
+    const { timestamp, sheetName } = getTimestamp();
+    const filename = `catalogo_log_${type}_${timestamp}.xlsx`;
 
-    const [date, time] = romeTime.split(', ');
-    const [day, month, year] = date.split('/');
-    const [hour, minute] = time.split(':');
-    
-    const timestamp = `${year}${month}${day}_${hour}${minute}`;
-    const filename = `catalogo_log_${timestamp}.csv`;
+    const logData = logs.map(entry => ({
+      'File Sorgente': entry.source_file,
+      'Riga': entry.line,
+      'Matnr': entry.Matnr,
+      'ManufPartNr': entry.ManufPartNr,
+      'EAN': entry.EAN,
+      'Motivo': entry.reason,
+      'Dettagli': entry.details
+    }));
 
-    // Create summary
-    const summary = [
-      'RIEPILOGO ELABORAZIONE',
-      `Timestamp: ${romeTime}`,
-      `Righe totali lette: ${stats?.totalRecords || 0}`,
-      `Righe esportate: ${stats?.validRecords || 0}`,
-      `Righe scartate: ${stats?.filteredRecords || 0}`,
-      `Duplicati stock: ${stats?.stockDuplicates || 0}`,
-      `Duplicati prezzi: ${stats?.priceDuplicates || 0}`,
-      '',
-      'DETTAGLIO SCARTI',
-      'source_file;line;Matnr;ManufPartNr;EAN;reason;details'
-    ];
-
-    const csvContent = [
-      ...summary,
-      ...logEntries.map(entry => 
-        `${entry.source_file};${entry.line};${entry.Matnr};${entry.ManufPartNr};${entry.EAN};${entry.reason};${entry.details}`
-      )
-    ].join('\n');
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    link.click();
+    const ws = XLSX.utils.json_to_sheet(logData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, filename);
 
     toast({
       title: "Log scaricato",
@@ -452,10 +450,10 @@ const ElaboratoreCatalogo: React.FC = () => {
         {/* Header */}
         <div className="text-center">
           <h1 className="text-5xl font-bold text-foreground mb-4">
-            Elaboratore Catalogo
+            Alterside Catalog Generator
           </h1>
           <p className="text-muted-foreground text-xl max-w-3xl mx-auto">
-            Carica i file TXT, elabora i dati con regole precise e scarica il catalogo Excel pronto per l'uso
+            Genera due cataloghi Excel distinti (EAN e ManufPartNr) con calcoli avanzati di prezzo e commissioni
           </p>
         </div>
 
@@ -464,13 +462,13 @@ const ElaboratoreCatalogo: React.FC = () => {
           <div className="flex items-start gap-4">
             <AlertCircle className="h-6 w-6 text-primary mt-1 flex-shrink-0" />
             <div>
-              <h3 className="text-lg font-semibold text-card-foreground mb-3">Istruzioni di Caricamento</h3>
+              <h3 className="text-lg font-semibold text-card-foreground mb-3">Specifiche di Elaborazione</h3>
               <ul className="text-sm text-muted-foreground space-y-2">
-                <li>• <strong>File CSV:</strong> Delimitatore punto e virgola (;), encoding UTF-8, header obbligatorio</li>
-                <li>• <strong>Unione dati:</strong> Left join su Matnr partendo dal MaterialFile</li>
-                <li>• <strong>Filtri applicati:</strong> EAN non vuoto, ExistingStock &gt; 0, prezzi numerici validi</li>
-                <li>• <strong>Calcoli:</strong> IVA al 22% sui prezzi, arrotondamento a 2 decimali</li>
-                <li>• <strong>Output:</strong> Excel con formato data italiana e log CSV dettagliato</li>
+                <li>• <strong>Filtri comuni:</strong> ExistingStock &gt; 1, prezzi numerici validi</li>
+                <li>• <strong>Export EAN:</strong> solo record con EAN non vuoto</li>
+                <li>• <strong>Export ManufPartNr:</strong> solo record con ManufPartNr non vuoto</li>
+                <li>• <strong>Prezzi:</strong> CustBestPrice arrotondato per eccesso, IVA 22%, commissioni 7% + 5%</li>
+                <li>• <strong>Prezzo finale:</strong> arrotondamento a ,99 (da Best) o intero superiore (da Listino)</li>
               </ul>
             </div>
           </div>
@@ -524,7 +522,7 @@ const ElaboratoreCatalogo: React.FC = () => {
 
         {/* Progress Section */}
         {processing && (
-          <Card className="p-6">
+          <Card className="p-6 processing-section">
             <h3 className="text-xl font-semibold mb-6 flex items-center gap-2">
               <Activity className="h-5 w-5 animate-spin" />
               Progresso Elaborazione
@@ -569,65 +567,117 @@ const ElaboratoreCatalogo: React.FC = () => {
         {stats && (
           <Card className="p-6">
             <h3 className="text-xl font-semibold text-card-foreground mb-6">Statistiche Elaborazione</h3>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              <div className="text-center p-4 bg-accent rounded-lg">
-                <div className="text-3xl font-bold text-primary">{stats.totalRecords.toLocaleString()}</div>
-                <div className="text-sm text-muted-foreground">Righe Totali</div>
+            <div className="flat-stats-grid">
+              <div className="flat-stats-card bg-accent">
+                <div className="flat-stats-number text-primary">{stats.totalRecords.toLocaleString()}</div>
+                <div className="flat-stats-label">Righe Totali</div>
               </div>
-              <div className="text-center p-4 bg-success/10 rounded-lg">
-                <div className="text-3xl font-bold text-success">{stats.validRecords.toLocaleString()}</div>
-                <div className="text-sm text-muted-foreground">Righe Valide</div>
+              <div className="flat-stats-card bg-success/10">
+                <div className="flat-stats-number text-success">{stats.validRecordsEAN.toLocaleString()}</div>
+                <div className="flat-stats-label">Valide EAN</div>
               </div>
-              <div className="text-center p-4 bg-destructive/10 rounded-lg">
-                <div className="text-3xl font-bold text-destructive">{stats.filteredRecords.toLocaleString()}</div>
-                <div className="text-sm text-muted-foreground">Righe Scartate</div>
+              <div className="flat-stats-card bg-success/10">
+                <div className="flat-stats-number text-success">{stats.validRecordsManufPartNr.toLocaleString()}</div>
+                <div className="flat-stats-label">Valide ManufPartNr</div>
               </div>
-              <div className="text-center p-4 bg-orange-100 rounded-lg">
-                <div className="text-3xl font-bold text-orange-600">{stats.stockDuplicates.toLocaleString()}</div>
-                <div className="text-sm text-muted-foreground">Duplicati Stock</div>
+              <div className="flat-stats-card bg-destructive/10">
+                <div className="flat-stats-number text-destructive">{stats.filteredRecordsEAN.toLocaleString()}</div>
+                <div className="flat-stats-label">Scartate EAN</div>
               </div>
-              <div className="text-center p-4 bg-orange-100 rounded-lg">
-                <div className="text-3xl font-bold text-orange-600">{stats.priceDuplicates.toLocaleString()}</div>
-                <div className="text-sm text-muted-foreground">Duplicati Prezzi</div>
+              <div className="flat-stats-card bg-destructive/10">
+                <div className="flat-stats-number text-destructive">{stats.filteredRecordsManufPartNr.toLocaleString()}</div>
+                <div className="flat-stats-label">Scartate ManufPartNr</div>
               </div>
             </div>
           </Card>
         )}
 
         {/* Download Buttons */}
-        {processedData.length > 0 && (
-          <div className="flex justify-center gap-6">
-            <Button onClick={downloadExcel} className="flat-button-success text-lg px-8 py-3">
+        {(processedDataEAN.length > 0 || processedDataManufPartNr.length > 0) && (
+          <div className="export-buttons">
+            <Button 
+              onClick={() => downloadExcel('ean')} 
+              className="flat-button-success text-lg px-8 py-3"
+              disabled={processedDataEAN.length === 0}
+            >
               <Download className="mr-3 h-5 w-5" />
-              SCARICA EXCEL
+              SCARICA EXCEL (EAN)
             </Button>
-            <Button onClick={downloadLog} variant="outline" className="border-2 text-lg px-8 py-3">
+            <Button 
+              onClick={() => downloadExcel('manufpartnr')} 
+              className="flat-button-success text-lg px-8 py-3"
+              disabled={processedDataManufPartNr.length === 0}
+            >
               <Download className="mr-3 h-5 w-5" />
-              SCARICA LOG
+              SCARICA EXCEL (ManufPartNr)
+            </Button>
+            <Button 
+              onClick={() => downloadLog('ean')} 
+              variant="outline" 
+              className="border-2 text-lg px-8 py-3"
+              disabled={logEntriesEAN.length === 0}
+            >
+              <Download className="mr-3 h-5 w-5" />
+              SCARICA LOG (EAN)
+            </Button>
+            <Button 
+              onClick={() => downloadLog('manufpartnr')} 
+              variant="outline" 
+              className="border-2 text-lg px-8 py-3"
+              disabled={logEntriesManufPartNr.length === 0}
+            >
+              <Download className="mr-3 h-5 w-5" />
+              SCARICA LOG (ManufPartNr)
             </Button>
           </div>
         )}
 
-        {/* Data Preview */}
-        {processedData.length > 0 && (
-          <Card className="p-6">
-            <h3 className="text-xl font-semibold text-card-foreground mb-6">Anteprima Dati (Prime 10 Righe)</h3>
+        {/* Data Previews */}
+        {processedDataEAN.length > 0 && (
+          <Card className="p-6 preview-section">
+            <h3 className="text-xl font-semibold text-card-foreground mb-6">Anteprima Export EAN (Prime 10 Righe)</h3>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="flat-table">
                 <thead>
-                  <tr className="border-b-2 border-border">
-                    {Object.keys(processedData[0]).map((header, index) => (
-                      <th key={index} className="text-left font-semibold p-3 bg-accent">
-                        {header}
-                      </th>
+                  <tr>
+                    {Object.keys(processedDataEAN[0]).map((header, index) => (
+                      <th key={index}>{header}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {processedData.slice(0, 10).map((row, rowIndex) => (
-                    <tr key={rowIndex} className={rowIndex % 2 === 0 ? 'bg-background' : 'bg-accent/30'}>
+                  {processedDataEAN.slice(0, 10).map((row, rowIndex) => (
+                    <tr key={rowIndex}>
                       {Object.values(row).map((value, colIndex) => (
-                        <td key={colIndex} className="p-3 border-b border-border">
+                        <td key={colIndex}>
+                          {typeof value === 'number' ? value.toLocaleString('it-IT') : String(value)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )}
+
+        {processedDataManufPartNr.length > 0 && (
+          <Card className="p-6 preview-section">
+            <h3 className="text-xl font-semibold text-card-foreground mb-6">Anteprima Export ManufPartNr (Prime 10 Righe)</h3>
+            <div className="overflow-x-auto">
+              <table className="flat-table">
+                <thead>
+                  <tr>
+                    {Object.keys(processedDataManufPartNr[0]).map((header, index) => (
+                      <th key={index}>{header}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {processedDataManufPartNr.slice(0, 10).map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {Object.values(row).map((value, colIndex) => (
+                        <td key={colIndex}>
                           {typeof value === 'number' ? value.toLocaleString('it-IT') : String(value)}
                         </td>
                       ))}
@@ -643,4 +693,4 @@ const ElaboratoreCatalogo: React.FC = () => {
   );
 };
 
-export default ElaboratoreCatalogo;
+export default AltersideCatalogGenerator;
