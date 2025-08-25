@@ -10,6 +10,8 @@ interface FileData {
   name: string;
   data: any[];
   headers: string[];
+  raw: File;
+  isValid?: boolean;
 }
 
 interface FileUploadState {
@@ -119,6 +121,11 @@ const AltersideCatalogGenerator: React.FC = () => {
     (window as any).dbg = dbg;
   }, [dbg]);
 
+  // Log state changes
+  useEffect(() => {
+    dbg('state:change', { state: processingState, ...debugState });
+  }, [processingState, debugState]);
+
   const validateHeaders = (headers: string[], requiredHeaders: string[], optionalHeaders: string[] = []): { 
     valid: boolean; 
     missing: string[]; 
@@ -205,6 +212,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         name: file.name,
         data: parsed.data,
         headers: parsed.headers,
+        raw: file,
         isValid: validation.valid
       };
 
@@ -350,7 +358,7 @@ const AltersideCatalogGenerator: React.FC = () => {
       return;
     }
 
-    // Validate that all required headers are present (don't wait for optional)
+    // Validate required headers only
     const materialValidation = validateHeaders(files.material.file.headers, REQUIRED_HEADERS.material);
     const stockValidation = validateHeaders(files.stock.file.headers, REQUIRED_HEADERS.stock);
     const priceValidation = validateHeaders(files.price.file.headers, REQUIRED_HEADERS.price);
@@ -364,23 +372,90 @@ const AltersideCatalogGenerator: React.FC = () => {
       return;
     }
 
-    // Count total rows from material file
+    // Reset outputs
+    setProcessedDataEAN([]);
+    setProcessedDataManufPartNr([]);
+    setLogEntriesEAN([]);
+    setLogEntriesManufPartNr([]);
+    setStats(null);
+
+    // Build maps (parse events)
+    const stockMap = new Map<string, { ExistingStock: number }>();
+    const priceMap = new Map<string, { ListPrice: number; CustBestPrice: number }>();
+    let stockDuplicates = 0;
+    let priceDuplicates = 0;
+
+    // STOCK parse (simulate chunk logging using one chunk)
+    dbg('parse:stock:start');
+    let stockRowCounter = 0;
+    files.stock.file.data.forEach((row, index) => {
+      const matnr = row.Matnr?.toString().trim();
+      if (!matnr) return;
+      stockRowCounter++;
+      if (stockMap.has(matnr)) {
+        stockDuplicates++;
+      } else {
+        stockMap.set(matnr, { ExistingStock: parseInt(row.ExistingStock) || 0 });
+      }
+    });
+    dbg('parse:stock:chunk', { chunkNumber: 1, rowsInChunk: stockRowCounter });
+    dbg('parse:stock:done', { totalRecords: stockMap.size, totalChunks: 1 });
+
+    // PRICE parse
+    dbg('parse:price:start');
+    let priceRowCounter = 0;
+    files.price.file.data.forEach((row, index) => {
+      const matnr = row.Matnr?.toString().trim();
+      if (!matnr) return;
+      priceRowCounter++;
+      if (priceMap.has(matnr)) {
+        priceDuplicates++;
+      } else {
+        priceMap.set(matnr, { ListPrice: parseFloat(row.ListPrice) || 0, CustBestPrice: parseFloat(row.CustBestPrice) || 0 });
+      }
+    });
+    dbg('parse:price:chunk', { chunkNumber: 1, rowsInChunk: priceRowCounter });
+    dbg('parse:price:done', { totalRecords: priceMap.size, totalChunks: 1 });
+
+    // Prescan Material (streaming) to count rows
     dbg('material:prescan:start');
-    const materialRowsCount = files.material.file.data.length;
-    
-    if (materialRowsCount === 0) {
-      dbg('material:prescan:error', { message: 'Nessuna riga valida nel Material' });
-      toast({
-        title: "Errore elaborazione",
-        description: "Nessuna riga valida nel Material",
-        variant: "destructive"
+    let materialRowsCount = 0;
+    await new Promise<void>((resolve, reject) => {
+      Papa.parse(files.material.file!.raw, {
+        header: true,
+        skipEmptyLines: true,
+        worker: true,
+        step: (results) => {
+          if (results && results.data) {
+            materialRowsCount++;
+            if (materialRowsCount % 500 === 0) dbg('material:prescan:chunk', { materialRowsCount });
+          }
+        },
+        complete: () => resolve(),
+        error: (err) => reject(err)
       });
+    }).catch(() => {
+      // Fallback prescan without worker
+      materialRowsCount = 0;
+      Papa.parse(files.material.file!.raw, {
+        header: true,
+        skipEmptyLines: true,
+        worker: false,
+        step: (results) => {
+          if (results && results.data) materialRowsCount++;
+        },
+        complete: () => {},
+      });
+    });
+
+    if (materialRowsCount <= 0) {
+      dbg('material:prescan:error', { message: 'Nessuna riga valida nel Material' });
+      toast({ title: 'Errore elaborazione', description: 'Nessuna riga valida nel Material', variant: 'destructive' });
       return;
     }
-    
     dbg('material:prescan:done', { materialRowsCount });
-    setDebugState(prev => ({ ...prev, materialPreScanDone: true }));
-    
+
+    // Init state machine and counters
     setProcessingState('running');
     setProgress(0);
     setProcessedRows(0);
@@ -388,54 +463,208 @@ const AltersideCatalogGenerator: React.FC = () => {
     setStartTime(Date.now());
     setElapsedTime(0);
     setEstimatedTime(null);
+    setDebugState(prev => ({ ...prev, stockReady: true, priceReady: true, materialPreScanDone: true }));
+
+    // Join streaming pass
+    const optionalHeadersMissing = {
+      stock: !files.stock.file.headers.includes('ManufPartNr'),
+      price: !files.price.file.headers.includes('ManufPartNr')
+    };
+
+    const processedEAN: ProcessedRecord[] = [];
+    const processedMPN: ProcessedRecord[] = [];
+    const logsEAN: LogEntry[] = [];
+    const logsMPN: LogEntry[] = [];
+
+    const ceilToXX99 = (value: number) => {
+      const integer = Math.floor(value);
+      const decimal = value - integer;
+      return decimal <= 0.99 ? integer + 0.99 : integer + 1.99;
+    };
+
+    const finalize = () => {
+      // Session header + optional header warnings
+      const sessionRow: LogEntry = {
+        source_file: 'session',
+        line: 0,
+        Matnr: '',
+        ManufPartNr: '',
+        EAN: '',
+        reason: 'session_start',
+        details: JSON.stringify({ event: 'session_start', materialRowsCount, optionalHeadersMissing, fees: { mediaworld: 0.08, alterside: 0.05 }, timestamp: new Date().toISOString() })
+      };
+      logsEAN.unshift(sessionRow);
+      logsMPN.unshift(sessionRow);
+      if (optionalHeadersMissing.stock) {
+        const r: LogEntry = { source_file: 'StockFileData_790813.txt', line: 0, Matnr: '', ManufPartNr: '', EAN: '', reason: 'header_optional_missing', details: 'ManufPartNr assente (uso ManufPartNr da Material)' };
+        logsEAN.splice(1, 0, r);
+        logsMPN.splice(1, 0, r);
+      }
+      if (optionalHeadersMissing.price) {
+        const idx = 1 + (optionalHeadersMissing.stock ? 1 : 0);
+        const r: LogEntry = { source_file: 'pricefileData_790813.txt', line: 0, Matnr: '', ManufPartNr: '', EAN: '', reason: 'header_optional_missing', details: 'ManufPartNr assente (uso ManufPartNr da Material)' };
+        logsEAN.splice(idx, 0, r);
+        logsMPN.splice(idx, 0, r);
+      }
+
+      setProcessedDataEAN(processedEAN);
+      setProcessedDataManufPartNr(processedMPN);
+      setLogEntriesEAN(logsEAN);
+      setLogEntriesManufPartNr(logsMPN);
+      setStats({
+        totalRecords: materialRowsCount,
+        validRecordsEAN: processedEAN.length,
+        validRecordsManufPartNr: processedMPN.length,
+        filteredRecordsEAN: logsEAN.length - 1,
+        filteredRecordsManufPartNr: logsMPN.length - 1,
+        stockDuplicates,
+        priceDuplicates
+      });
+
+      setProcessingState('completed');
+      setProgress(100);
+    };
+
+    // Wait dependencies observation
+    setTimeout(() => {
+      if (totalRows > 0 && processedRows === 0) {
+        toast({ title: 'Elaborazione non avviata: verifico dipendenze', description: '', variant: 'default' });
+        dbg('join_waiting_dependencies');
+      }
+    }, 2000);
+
+    const runJoin = (useWorker: boolean) => new Promise<void>((resolve, reject) => {
+      dbg('join:start', { worker: useWorker });
+      setDebugState(prev => ({ ...prev, joinStarted: true }));
+
+      let firstChunk = false;
+      let aborted = false;
+      let parserRef: any = null;
+      const fallbackTimer = setTimeout(() => {
+        if (!firstChunk && useWorker) {
+          toast({ title: 'Nessuna riga processata, fallback worker:false', description: '', variant: 'default' });
+          dbg('join:fallback', { reason: 'no_chunk_within_2s' });
+          try { parserRef && parserRef.abort && parserRef.abort(); } catch {}
+          // Relaunch without worker
+          runJoin(false).then(resolve).catch(reject);
+        }
+      }, 2000);
+
+      let processedLocal = 0;
+
+      Papa.parse(files.material.file!.raw, {
+        header: true,
+        skipEmptyLines: true,
+        worker: useWorker,
+        step: (results, parser) => {
+          if (!firstChunk) { firstChunk = true; clearTimeout(fallbackTimer); }
+          parserRef = parser;
+          const row = results.data as any;
+          const matnr = row?.Matnr?.toString().trim();
+          if (!matnr) return;
+
+          const stock = stockMap.get(matnr);
+          const price = priceMap.get(matnr);
+
+          if (!stock) {
+            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: row.ManufPartNr || '', EAN: row.EAN || '', reason: 'join_missing_stock', details: 'Nessun dato stock trovato' };
+            logsEAN.push(le); logsMPN.push(le);
+            return;
+          }
+          if (!price) {
+            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: row.ManufPartNr || '', EAN: row.EAN || '', reason: 'join_missing_price', details: 'Nessun dato prezzo trovato' };
+            logsEAN.push(le); logsMPN.push(le);
+            return;
+          }
+
+          const existingStock = parseInt(stock.ExistingStock as any) || 0;
+          const listPriceNum = Number(price.ListPrice) || 0;
+          const custBestNumRaw = Number(price.CustBestPrice) || 0;
+          if (existingStock <= 1) {
+            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: row.ManufPartNr || '', EAN: row.EAN || '', reason: 'stock_leq_1', details: `ExistingStock=${existingStock} <= 1` };
+            logsEAN.push(le); logsMPN.push(le);
+            return;
+          }
+          if (!(listPriceNum > 0)) {
+            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: row.ManufPartNr || '', EAN: row.EAN || '', reason: 'price_missing', details: `ListPrice non valido: ${listPriceNum}` };
+            logsEAN.push(le); logsMPN.push(le);
+            return;
+          }
+          if (!(custBestNumRaw > 0)) {
+            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: row.ManufPartNr || '', EAN: row.EAN || '', reason: 'custbest_missing', details: `CustBestPrice non valido: ${custBestNumRaw}` };
+            logsEAN.push(le); logsMPN.push(le);
+            return;
+          }
+
+          const custBestPriceCeil = Math.ceil(custBestNumRaw);
+          const listPriceWithIVA = listPriceNum * 1.22;
+          const custBestWithIVA = custBestPriceCeil * 1.22;
+          const finalPriceBest = ceilToXX99(((custBestWithIVA + 5) * 1.08) * 1.05);
+          const finalPriceListino = Math.ceil(((listPriceWithIVA + 5) * 1.08) * 1.05);
+
+          const base: ProcessedRecord = {
+            Matnr: matnr,
+            ManufPartNr: row.ManufPartNr || '', // always from Material
+            EAN: row.EAN?.toString().trim() || '',
+            ShortDescription: row.ShortDescription || '',
+            ExistingStock: existingStock,
+            ListPrice: listPriceNum,
+            CustBestPrice: custBestPriceCeil,
+            IVA: '22%',
+            'ListPrice con IVA': listPriceWithIVA,
+            'CustBestPrice con IVA': custBestWithIVA,
+            'Costo di spedizione': 5,
+            'Fee Mediaworld': '8%',
+            'Fee Alterside': '5%',
+            'Prezzo finale': finalPriceBest,
+            'Prezzo finale Listino': finalPriceListino
+          };
+
+          if (base.EAN) {
+            processedEAN.push(base);
+          } else {
+            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: base.ManufPartNr, EAN: '', reason: 'ean_empty', details: 'EAN vuoto o mancante' };
+            logsEAN.push(le);
+          }
+
+          if (base.ManufPartNr) {
+            processedMPN.push(base);
+          } else {
+            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: '', EAN: base.EAN, reason: 'manufpartnr_empty', details: 'ManufPartNr vuoto o mancante' };
+            logsMPN.push(le);
+          }
+
+          processedLocal++;
+          const newProcessed = processedLocal;
+          setProcessedRows(p => {
+            const val = newProcessed; 
+            setProgress(Math.min(99, Math.floor((val / materialRowsCount) * 100)));
+            return val;
+          });
+          dbg('join:chunk', { processed: newProcessed });
+        },
+        complete: () => {
+          dbg('join:done');
+          resolve();
+        },
+        error: (err) => {
+          reject(err);
+        }
+      });
+    });
 
     try {
-      // Create Web Worker
-      workerRef.current = new Worker('/alterside-worker.js');
-      
-      workerRef.current.onmessage = (e) => {
-        if (e.data.type === 'debug') {
-          dbg(e.data.event, e.data.data);
-        } else if (e.data.type === 'progress') {
-          setProcessedRows(e.data.processed);
-          setProgress(Math.min(99, Math.floor(e.data.processed / totalRows * 100)));
-        } else if (e.data.type === 'complete') {
-          setProcessedDataEAN(e.data.data.processedDataEAN || []);
-          setProcessedDataManufPartNr(e.data.data.processedDataManufPartNr || []);
-          setLogEntriesEAN(e.data.data.logEntriesEAN || []);
-          setLogEntriesManufPartNr(e.data.data.logEntriesManufPartNr || []);
-          setStats(e.data.data.statistics);
-          setProcessingState('completed');
-          setProgress(100);
-          
-          toast({
-            title: "Elaborazione completata",
-            description: `EAN: ${(e.data.data.processedDataEAN || []).length} record | ManufPartNr: ${(e.data.data.processedDataManufPartNr || []).length} record`
-          });
-        } else if (e.data.type === 'error') {
-          setProcessingState('failed');
-          toast({
-            title: "Errore elaborazione",
-            description: e.data.error,
-            variant: "destructive"
-          });
-        }
-      };
-
-      // Send data to worker
-      workerRef.current.postMessage({
-        materialFile: files.material.file,
-        stockFile: files.stock.file,
-        priceFile: files.price.file
-      });
-
-    } catch (error) {
-      setProcessingState('failed');
-      toast({
-        title: "Errore",
-        description: "Errore durante l'avvio dell'elaborazione",
-        variant: "destructive"
-      });
+      await runJoin(true);
+      finalize();
+    } catch (err) {
+      // ultimate fallback: try without worker
+      try {
+        await runJoin(false);
+        finalize();
+      } catch (e) {
+        setProcessingState('failed');
+        toast({ title: 'Errore elaborazione', description: 'Impossibile completare la join', variant: 'destructive' });
+      }
     }
   };
 
