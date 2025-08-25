@@ -75,9 +75,13 @@ const AltersideCatalogGenerator: React.FC = () => {
     price: { file: null, status: 'none' }
   });
 
-  const [processing, setProcessing] = useState(false);
-  const [progress, setProgress] = useState({ stage: '', progress: 0, recordsProcessed: 0, totalRecords: 0 });
-  const [processingTime, setProcessingTime] = useState({ started: 0, elapsed: 0, estimated: 0 });
+  const [processingState, setProcessingState] = useState<'idle' | 'validating' | 'ready' | 'running' | 'completed' | 'failed'>('idle');
+  const [progress, setProgress] = useState(0);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [estimatedTime, setEstimatedTime] = useState<number | null>(null);
+  const [processedRows, setProcessedRows] = useState(0);
+  const [totalRows, setTotalRows] = useState(0);
   const [processedDataEAN, setProcessedDataEAN] = useState<ProcessedRecord[]>([]);
   const [processedDataManufPartNr, setProcessedDataManufPartNr] = useState<ProcessedRecord[]>([]);
   const [logEntriesEAN, setLogEntriesEAN] = useState<LogEntry[]>([]);
@@ -138,10 +142,11 @@ const AltersideCatalogGenerator: React.FC = () => {
       
       if (!validation.valid) {
         const error = `Header mancanti: ${validation.missing.join(', ')}`;
-        setFiles(prev => ({
-          ...prev,
-          [type]: { file: null, status: 'error', error }
-        }));
+      setFiles(prev => ({
+        ...prev,
+        [type]: { file: null, status: 'error', error }
+      }));
+      setProcessingState('idle');
         
         toast({
           title: "Errore validazione header",
@@ -177,6 +182,25 @@ const AltersideCatalogGenerator: React.FC = () => {
         }
       }));
 
+      // Update processing state
+      const newFiles = {
+        ...files,
+        [type]: {
+          file: {
+            name: file.name,
+            data: parsed.data,
+            headers: parsed.headers
+          },
+          status,
+          warning: status === 'warning' ? warning : undefined
+        }
+      };
+      
+      const allLoaded = Object.values(newFiles).every(f => f.status === 'valid' || f.status === 'warning');
+      if (allLoaded) {
+        setProcessingState('ready');
+      }
+
       const toastMessage = status === 'warning' 
         ? `${file.name} - ${parsed.data.length} righe (con avviso)`
         : `${file.name} - ${parsed.data.length} righe`;
@@ -193,6 +217,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         ...prev,
         [type]: { file: null, status: 'error', error: errorMsg }
       }));
+      setProcessingState('idle');
       
       toast({
         title: "Errore caricamento file",
@@ -203,18 +228,35 @@ const AltersideCatalogGenerator: React.FC = () => {
   };
 
   const formatTime = (ms: number): string => {
+    if (!ms || ms <= 0) return '00:00';
     const seconds = Math.floor(ms / 1000);
     const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-    
-    if (hours > 0) {
-      return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
-    } else if (minutes > 0) {
-      return `${minutes}m ${seconds % 60}s`;
-    } else {
-      return `${seconds}s`;
-    }
+    return `${minutes.toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
   };
+
+  // Timer effect
+  React.useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (processingState === 'running' && startTime) {
+      interval = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        setElapsedTime(elapsed);
+        
+        // Calculate ETA every 500ms
+        if (processedRows > 0 && totalRows > 0) {
+          const rate = processedRows / (elapsed / 1000);
+          if (rate >= 0.1) {
+            const remaining = Math.max(0, totalRows - processedRows);
+            const etaSec = remaining / rate;
+            setEstimatedTime(etaSec * 1000);
+          } else {
+            setEstimatedTime(null);
+          }
+        }
+      }, 500);
+    }
+    return () => clearInterval(interval);
+  }, [processingState, startTime, processedRows, totalRows]);
 
   const processData = async () => {
     if (!files.material.file || !files.stock.file || !files.price.file) {
@@ -226,15 +268,16 @@ const AltersideCatalogGenerator: React.FC = () => {
       return;
     }
 
-    setProcessing(true);
-    setProcessingTime({ started: Date.now(), elapsed: 0, estimated: 0 });
+    // Count total rows from material file
+    const materialRowsCount = files.material.file.data.length;
     
-    // Start timing
-    timeInterval.current = setInterval(() => {
-      const elapsed = Date.now() - processingTime.started;
-      const estimated = progress.progress > 0 ? (elapsed / progress.progress) * (100 - progress.progress) : 0;
-      setProcessingTime(prev => ({ ...prev, elapsed, estimated }));
-    }, 1000);
+    setProcessingState('running');
+    setProgress(0);
+    setStartTime(Date.now());
+    setElapsedTime(0);
+    setEstimatedTime(null);
+    setProcessedRows(0);
+    setTotalRows(Math.max(1, materialRowsCount));
 
     try {
       // Create Web Worker
@@ -245,12 +288,10 @@ const AltersideCatalogGenerator: React.FC = () => {
         
         switch (type) {
           case 'progress':
-            setProgress({
-              stage: data.stage,
-              progress: data.progress,
-              recordsProcessed: data.recordsProcessed || 0,
-              totalRecords: data.totalRecords || 0
-            });
+            setProgress(Math.min(99, data.progress));
+            if (data.recordsProcessed !== undefined) {
+              setProcessedRows(data.recordsProcessed);
+            }
             break;
             
           case 'complete':
@@ -259,28 +300,22 @@ const AltersideCatalogGenerator: React.FC = () => {
             setLogEntriesEAN(data.logEntriesEAN);
             setLogEntriesManufPartNr(data.logEntriesManufPartNr);
             setStats(data.stats);
+            setProcessingState('completed');
+            setProgress(100);
             
             toast({
               title: "Elaborazione completata",
               description: `EAN: ${data.processedDataEAN.length} record | ManufPartNr: ${data.processedDataManufPartNr.length} record`
             });
-            
-            setProcessing(false);
-            if (timeInterval.current) {
-              clearInterval(timeInterval.current);
-            }
             break;
             
           case 'error':
+            setProcessingState('failed');
             toast({
               title: "Errore elaborazione",
               description: data.error,
               variant: "destructive"
             });
-            setProcessing(false);
-            if (timeInterval.current) {
-              clearInterval(timeInterval.current);
-            }
             break;
         }
       };
@@ -295,15 +330,12 @@ const AltersideCatalogGenerator: React.FC = () => {
       });
 
     } catch (error) {
+      setProcessingState('failed');
       toast({
         title: "Errore",
         description: "Errore durante l'avvio dell'elaborazione",
         variant: "destructive"
       });
-      setProcessing(false);
-      if (timeInterval.current) {
-        clearInterval(timeInterval.current);
-      }
     }
   };
 
@@ -471,7 +503,16 @@ const AltersideCatalogGenerator: React.FC = () => {
                 </div>
               </div>
               <button
-                onClick={() => setFiles(prev => ({ ...prev, [type]: { file: null, status: 'none' } }))}
+                onClick={() => {
+                  setFiles(prev => ({ ...prev, [type]: { file: null, status: 'none' } }));
+                  setProcessingState('idle');
+                  setStartTime(null);
+                  setProcessedRows(0);
+                  setTotalRows(0);
+                  setElapsedTime(0);
+                  setEstimatedTime(null);
+                  setProgress(0);
+                }}
                 className="btn btn-secondary text-sm px-3 py-2"
               >
                 Rimuovi
@@ -512,6 +553,9 @@ const AltersideCatalogGenerator: React.FC = () => {
   const allFilesValid = files.material.status === 'valid' && 
     (files.stock.status === 'valid' || files.stock.status === 'warning') && 
     (files.price.status === 'valid' || files.price.status === 'warning');
+  const canProcess = allFilesValid && (processingState === 'ready' || processingState === 'idle');
+  const isProcessing = processingState === 'running';
+  const isCompleted = processingState === 'completed';
 
   return (
     <div className="min-h-screen p-6" style={{ background: 'var(--bg)', color: 'var(--fg)' }}>
@@ -537,7 +581,7 @@ const AltersideCatalogGenerator: React.FC = () => {
                   <li>• <strong>Filtri comuni:</strong> ExistingStock &gt; 1, prezzi numerici validi</li>
                   <li>• <strong>Export EAN:</strong> solo record con EAN non vuoto</li>
                   <li>• <strong>Export ManufPartNr:</strong> solo record con ManufPartNr non vuoto</li>
-                  <li>• <strong>Prezzi:</strong> CustBestPrice arrotondato per eccesso, IVA 22%, commissioni 7% + 5%</li>
+                  <li>• <strong>Prezzi:</strong> CustBestPrice arrotondato per eccesso, IVA 22%, commissioni 8% + 5%</li>
                   <li>• <strong>Prezzo finale:</strong> arrotondamento a ,99 (da Best) o intero superiore (da Listino)</li>
                 </ul>
               </div>
@@ -575,10 +619,10 @@ const AltersideCatalogGenerator: React.FC = () => {
           <div className="text-center">
             <button
               onClick={processData}
-              disabled={processing}
-              className={`btn btn-primary text-lg px-12 py-4 ${processing ? 'is-disabled' : ''}`}
+              disabled={!canProcess || isProcessing}
+              className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isProcessing ? 'is-disabled' : ''}`}
             >
-              {processing ? (
+              {isProcessing ? (
                 <>
                   <Activity className="mr-3 h-5 w-5 animate-spin" />
                   Elaborazione in corso...
@@ -594,7 +638,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         )}
 
         {/* Progress Section */}
-        {processing && (
+        {isProcessing && (
           <div className="card border-strong">
             <div className="card-body">
               <h3 className="card-title mb-6 flex items-center gap-2">
@@ -604,32 +648,30 @@ const AltersideCatalogGenerator: React.FC = () => {
               
               <div className="space-y-4">
                 <div className="progress">
-                  <span style={{ width: `${progress.progress}%` }} />
+                  <span style={{ width: `${progress}%` }} />
                 </div>
                 
                 <div className="flex justify-between text-sm">
-                  <span className="font-medium">{progress.stage}</span>
-                  <span className="font-bold">{progress.progress}%</span>
+                  <span className="font-medium">{progress}%</span>
+                  <span className="font-bold">Completato</span>
                 </div>
-                
-                {progress.totalRecords > 0 && (
-                  <div className="text-sm text-muted">
-                    Record elaborati: {progress.recordsProcessed.toLocaleString()} / {progress.totalRecords.toLocaleString()}
-                  </div>
-                )}
                 
                 <div className="flex items-center gap-6 text-sm">
                   <div className="flex items-center gap-2">
                     <Clock className="h-4 w-4 icon-dark" />
-                    <span>Trascorso: {formatTime(processingTime.elapsed)}</span>
+                    <span>Trascorso: {formatTime(elapsedTime)}</span>
                   </div>
-                  {processingTime.estimated > 0 && (
-                    <div className="flex items-center gap-2">
-                      <Clock className="h-4 w-4 icon-dark" />
-                      <span>Stimato: {formatTime(processingTime.estimated)}</span>
-                    </div>
-                  )}
+                  <div className="flex items-center gap-2">
+                    <Clock className="h-4 w-4 icon-dark" />
+                    <span>ETA: {estimatedTime ? formatTime(estimatedTime) : (processedRows > 0 && !isCompleted ? 'calcolo…' : '—')}</span>
+                  </div>
                 </div>
+                
+                {(isProcessing || isCompleted) && (
+                  <div className="text-sm text-muted">
+                    Elaborati: {processedRows.toLocaleString('it-IT')} / {totalRows.toLocaleString('it-IT')} record
+                  </div>
+                )}
               </div>
             </div>
           </div>

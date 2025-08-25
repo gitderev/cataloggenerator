@@ -308,11 +308,11 @@ function processFiles(files) {
     const custBestPriceWithIVA = roundHalfUp(custBestPriceCeil * 1.22);
     
     // Final price calculations
-    // From CustBestPrice: ((((CustBestPrice_ceil × 1,22) + 5) × 1,07) × 1,05) with ceil to xx,99
-    const finalPriceBest = ceilToXX99(((custBestPriceWithIVA + 5) * 1.07) * 1.05);
+    // From CustBestPrice: ((((CustBestPrice_ceil × 1,22) + 5) × 1,08) × 1,05) with ceil to xx,99
+    const finalPriceBest = ceilToXX99(((custBestPriceWithIVA + 5) * 1.08) * 1.05);
     
-    // From ListPrice: ceil(((ListPrice × 1,22) + 5) × 1,07) × 1,05)
-    const finalPriceListino = Math.ceil(((listPriceWithIVA + 5) * 1.07) * 1.05);
+    // From ListPrice: ceil(((ListPrice × 1,22) + 5) × 1,08) × 1,05)
+    const finalPriceListino = Math.ceil(((listPriceWithIVA + 5) * 1.08) * 1.05);
 
     // Create base record
     const baseRecord = {
@@ -327,7 +327,7 @@ function processFiles(files) {
       'ListPrice con IVA': listPriceWithIVA,
       'CustBestPrice con IVA': custBestPriceWithIVA,
       'Costo di spedizione': 5,
-      'Fee Mediaworld': '7%',
+      'Fee Mediaworld': '8%',
       'Fee Alterside': '5%',
       'Prezzo finale': finalPriceBest,
       'Prezzo finale Listino': finalPriceListino
@@ -368,13 +368,37 @@ function processFiles(files) {
 
   updateProgress('Finalizzazione', 95);
 
+  // Add session info to logs
+  const sessionInfo = {
+    source_file: 'session',
+    line: 0,
+    Matnr: '',
+    ManufPartNr: '',
+    EAN: '',
+    reason: 'session_start',
+    details: JSON.stringify({
+      event: 'session_start',
+      materialRowsCount: files.material.data.length,
+      optionalHeadersMissing: {
+        stock: !stockHeaders.includes('ManufPartNr'),
+        price: !priceHeaders.includes('ManufPartNr')
+      },
+      fees: { mediaworld: 0.08, alterside: 0.05 },
+      timestamp: new Date().toISOString()
+    })
+  };
+  
+  // Insert session info at the beginning of logs
+  logsEAN.unshift(sessionInfo);
+  logsManufPartNr.unshift(sessionInfo);
+
   // Calculate statistics
   const stats = {
     totalRecords: files.material.data.length,
     validRecordsEAN: processedEAN.length,
     validRecordsManufPartNr: processedManufPartNr.length,
-    filteredRecordsEAN: logsEAN.length,
-    filteredRecordsManufPartNr: logsManufPartNr.length,
+    filteredRecordsEAN: logsEAN.length - 1, // Subtract session info
+    filteredRecordsManufPartNr: logsManufPartNr.length - 1, // Subtract session info
     stockDuplicates: stockDuplicates.size,
     priceDuplicates: priceDuplicates.size
   };
