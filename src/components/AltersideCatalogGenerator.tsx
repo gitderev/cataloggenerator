@@ -13,9 +13,9 @@ interface FileData {
 }
 
 interface FileUploadState {
-  material: { file: FileData | null; status: 'none' | 'valid' | 'error'; error?: string };
-  stock: { file: FileData | null; status: 'none' | 'valid' | 'error'; error?: string };
-  price: { file: FileData | null; status: 'none' | 'valid' | 'error'; error?: string };
+  material: { file: FileData | null; status: 'none' | 'valid' | 'error'; error?: string; warning?: string };
+  stock: { file: FileData | null; status: 'none' | 'valid' | 'error' | 'warning'; error?: string; warning?: string };
+  price: { file: FileData | null; status: 'none' | 'valid' | 'error' | 'warning'; error?: string; warning?: string };
 }
 
 interface ProcessedRecord {
@@ -58,8 +58,14 @@ interface ProcessingStats {
 
 const REQUIRED_HEADERS = {
   material: ['Matnr', 'ManufPartNr', 'EAN', 'ShortDescription'],
-  stock: ['Matnr', 'ManufPartNr', 'ExistingStock'],
-  price: ['Matnr', 'ManufPartNr', 'ListPrice', 'CustBestPrice']
+  stock: ['Matnr', 'ExistingStock'],
+  price: ['Matnr', 'ListPrice', 'CustBestPrice']
+};
+
+const OPTIONAL_HEADERS = {
+  material: [],
+  stock: ['ManufPartNr'],
+  price: ['ManufPartNr']
 };
 
 const AltersideCatalogGenerator: React.FC = () => {
@@ -81,10 +87,22 @@ const AltersideCatalogGenerator: React.FC = () => {
   const workerRef = useRef<Worker | null>(null);
   const timeInterval = useRef<NodeJS.Timeout | null>(null);
 
-  const validateHeaders = (headers: string[], requiredHeaders: string[]): { valid: boolean; missing: string[] } => {
-    const normalizedHeaders = headers.map(h => h.trim());
+  const validateHeaders = (headers: string[], requiredHeaders: string[], optionalHeaders: string[] = []): { 
+    valid: boolean; 
+    missing: string[]; 
+    missingOptional: string[];
+    hasWarning: boolean;
+  } => {
+    const normalizedHeaders = headers.map(h => h.trim().replace(/^\uFEFF/, '')); // Remove BOM
     const missing = requiredHeaders.filter(req => !normalizedHeaders.includes(req));
-    return { valid: missing.length === 0, missing };
+    const missingOptional = optionalHeaders.filter(opt => !normalizedHeaders.includes(opt));
+    
+    return { 
+      valid: missing.length === 0, 
+      missing, 
+      missingOptional,
+      hasWarning: missingOptional.length > 0
+    };
   };
 
   const parseCSV = async (file: File): Promise<{ data: any[]; headers: string[] }> => {
@@ -116,7 +134,7 @@ const AltersideCatalogGenerator: React.FC = () => {
   const handleFileUpload = async (file: File, type: keyof FileUploadState) => {
     try {
       const parsed = await parseCSV(file);
-      const validation = validateHeaders(parsed.headers, REQUIRED_HEADERS[type]);
+      const validation = validateHeaders(parsed.headers, REQUIRED_HEADERS[type], OPTIONAL_HEADERS[type]);
       
       if (!validation.valid) {
         const error = `Header mancanti: ${validation.missing.join(', ')}`;
@@ -133,6 +151,19 @@ const AltersideCatalogGenerator: React.FC = () => {
         return;
       }
 
+      // Handle warnings for optional headers
+      let warning = '';
+      let status: 'valid' | 'warning' = 'valid';
+      
+      if (validation.hasWarning && (type === 'stock' || type === 'price')) {
+        status = 'warning';
+        if (type === 'stock') {
+          warning = 'Header opzionale assente: ManufPartNr (continuerò usando il valore dal Material).';
+        } else if (type === 'price') {
+          warning = 'Header opzionale assente: ManufPartNr (continuerò usando il valore dal Material).';
+        }
+      }
+
       setFiles(prev => ({
         ...prev,
         [type]: {
@@ -141,13 +172,19 @@ const AltersideCatalogGenerator: React.FC = () => {
             data: parsed.data,
             headers: parsed.headers
           },
-          status: 'valid'
+          status,
+          warning: status === 'warning' ? warning : undefined
         }
       }));
 
+      const toastMessage = status === 'warning' 
+        ? `${file.name} - ${parsed.data.length} righe (con avviso)`
+        : `${file.name} - ${parsed.data.length} righe`;
+
       toast({
         title: "File caricato con successo",
-        description: `${file.name} - ${parsed.data.length} righe`
+        description: toastMessage,
+        variant: status === 'warning' ? 'default' : 'default'
       });
 
     } catch (error) {
@@ -357,7 +394,8 @@ const AltersideCatalogGenerator: React.FC = () => {
     description: string;
     type: keyof FileUploadState;
     requiredHeaders: string[];
-  }> = ({ title, description, type, requiredHeaders }) => {
+    optionalHeaders: string[];
+  }> = ({ title, description, type, requiredHeaders, optionalHeaders }) => {
     const fileState = files[type];
     
     return (
@@ -371,6 +409,12 @@ const AltersideCatalogGenerator: React.FC = () => {
                 Caricato
               </div>
             )}
+            {fileState.status === 'warning' && (
+              <div className="badge-ok" style={{ background: '#fff3cd', color: '#856404', border: '1px solid #ffeaa7' }}>
+                <AlertCircle className="w-4 h-4" />
+                Caricato (con avviso)
+              </div>
+            )}
             {fileState.status === 'error' && (
               <div className="badge-err">
                 <XCircle className="w-4 h-4" />
@@ -382,7 +426,10 @@ const AltersideCatalogGenerator: React.FC = () => {
           <p className="text-muted text-sm mb-4">{description}</p>
           
           <div className="text-xs text-muted mb-4">
-            <strong>Header richiesti:</strong> {requiredHeaders.join(', ')}
+            <div><strong>Header richiesti:</strong> {requiredHeaders.join(', ')}</div>
+            {optionalHeaders.length > 0 && (
+              <div><strong>Header opzionali:</strong> {optionalHeaders.join(', ')}</div>
+            )}
           </div>
 
           {!fileState.file ? (
@@ -437,12 +484,34 @@ const AltersideCatalogGenerator: React.FC = () => {
               <p className="text-sm font-medium">{fileState.error}</p>
             </div>
           )}
+
+          {fileState.status === 'warning' && fileState.warning && (
+            <div className="mt-4 p-3 rounded-lg border-strong" style={{ background: '#fff3cd', color: '#856404' }}>
+              <p className="text-sm font-medium">{fileState.warning}</p>
+            </div>
+          )}
+
+          {fileState.file && (
+            <div className="mt-4 p-3 rounded-lg border-strong bg-gray-50">
+              <h4 className="text-sm font-medium mb-2">Diagnostica</h4>
+              <div className="text-xs text-muted">
+                <div><strong>Header rilevati:</strong> {fileState.file.headers.join(', ')}</div>
+                {fileState.file.data.length > 0 && (
+                  <div className="mt-1">
+                    <strong>Prima riga di dati:</strong> {Object.values(fileState.file.data[0]).slice(0, 3).join(', ')}...
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
   };
 
-  const allFilesValid = files.material.status === 'valid' && files.stock.status === 'valid' && files.price.status === 'valid';
+  const allFilesValid = files.material.status === 'valid' && 
+    (files.stock.status === 'valid' || files.stock.status === 'warning') && 
+    (files.price.status === 'valid' || files.price.status === 'warning');
 
   return (
     <div className="min-h-screen p-6" style={{ background: 'var(--bg)', color: 'var(--fg)' }}>
@@ -483,18 +552,21 @@ const AltersideCatalogGenerator: React.FC = () => {
             description="File principale con informazioni prodotto"
             type="material"
             requiredHeaders={REQUIRED_HEADERS.material}
+            optionalHeaders={OPTIONAL_HEADERS.material}
           />
           <FileUploadCard
             title="Stock File Data"
             description="Dati scorte e disponibilità"
             type="stock"
             requiredHeaders={REQUIRED_HEADERS.stock}
+            optionalHeaders={OPTIONAL_HEADERS.stock}
           />
           <FileUploadCard
             title="Price File Data"
             description="Listini prezzi e scontistiche"
             type="price"
             requiredHeaders={REQUIRED_HEADERS.price}
+            optionalHeaders={OPTIONAL_HEADERS.price}
           />
         </div>
 

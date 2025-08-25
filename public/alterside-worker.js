@@ -88,6 +88,38 @@ function processFiles(files) {
 
   updateProgress('Inizializzazione', 5);
 
+  // Check for missing optional headers and log them
+  const stockHeaders = files.stock.headers || [];
+  const priceHeaders = files.price.headers || [];
+  
+  if (!stockHeaders.includes('ManufPartNr')) {
+    const headerMissingLog = {
+      source_file: 'StockFileData_790813.txt',
+      line: '',
+      Matnr: '',
+      ManufPartNr: '',
+      EAN: '',
+      reason: 'header_optional_missing',
+      details: 'ManufPartNr assente (uso ManufPartNr da Material)'
+    };
+    logsEAN.push(headerMissingLog);
+    logsManufPartNr.push(headerMissingLog);
+  }
+  
+  if (!priceHeaders.includes('ManufPartNr')) {
+    const headerMissingLog = {
+      source_file: 'pricefileData_790813.txt',
+      line: '',
+      Matnr: '',
+      ManufPartNr: '',
+      EAN: '',
+      reason: 'header_optional_missing',
+      details: 'ManufPartNr assente (uso ManufPartNr da Material)'
+    };
+    logsEAN.push(headerMissingLog);
+    logsManufPartNr.push(headerMissingLog);
+  }
+
   // Create lookup maps for performance
   const stockMap = new Map();
   const priceMap = new Map();
