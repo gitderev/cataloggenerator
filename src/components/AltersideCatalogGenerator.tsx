@@ -86,6 +86,9 @@ const AltersideCatalogGenerator: React.FC = () => {
   const processedRef = useRef(0);
   const [progressPct, setProgressPct] = useState(0);
   
+  // Ensure no stale references to undefined variables
+  const processedRows = processed; // Alias for compatibility
+  
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
   const [estimatedTime, setEstimatedTime] = useState<number | null>(null);
