@@ -182,7 +182,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         }
       }));
 
-      // Update processing state
+      // Update processing state - ready when all files have valid required headers
       const newFiles = {
         ...files,
         [type]: {
@@ -196,8 +196,15 @@ const AltersideCatalogGenerator: React.FC = () => {
         }
       };
       
-      const allLoaded = Object.values(newFiles).every(f => f.status === 'valid' || f.status === 'warning');
-      if (allLoaded) {
+      // Check if all files are loaded with valid required headers (warnings don't block)
+      const allRequiredHeadersValid = Object.entries(newFiles).every(([fileType, fileState]) => {
+        if (!fileState.file) return false;
+        const requiredHeaders = REQUIRED_HEADERS[fileType as keyof typeof REQUIRED_HEADERS];
+        const validation = validateHeaders(fileState.file.headers, requiredHeaders);
+        return validation.valid; // Only check required headers
+      });
+      
+      if (allRequiredHeadersValid) {
         setProcessingState('ready');
       }
 
@@ -268,8 +275,31 @@ const AltersideCatalogGenerator: React.FC = () => {
       return;
     }
 
+    // Validate that all required headers are present (don't wait for optional)
+    const materialValidation = validateHeaders(files.material.file.headers, REQUIRED_HEADERS.material);
+    const stockValidation = validateHeaders(files.stock.file.headers, REQUIRED_HEADERS.stock);
+    const priceValidation = validateHeaders(files.price.file.headers, REQUIRED_HEADERS.price);
+
+    if (!materialValidation.valid || !stockValidation.valid || !priceValidation.valid) {
+      toast({
+        title: "Header obbligatori mancanti",
+        description: "Verifica che tutti i file abbiano gli header richiesti",
+        variant: "destructive"
+      });
+      return;
+    }
+
     // Count total rows from material file
     const materialRowsCount = files.material.file.data.length;
+    
+    if (materialRowsCount === 0) {
+      toast({
+        title: "Errore elaborazione",
+        description: "Nessuna riga valida nel Material",
+        variant: "destructive"
+      });
+      return;
+    }
     
     setProcessingState('running');
     setProgress(0);
@@ -638,7 +668,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         )}
 
         {/* Progress Section */}
-        {isProcessing && (
+        {(isProcessing || isCompleted) && (
           <div className="card border-strong">
             <div className="card-body">
               <h3 className="card-title mb-6 flex items-center gap-2">
@@ -647,6 +677,10 @@ const AltersideCatalogGenerator: React.FC = () => {
               </h3>
               
               <div className="space-y-4">
+                <div className="text-sm text-muted mb-2">
+                  <strong>Stato corrente:</strong> {processingState === 'running' ? 'running' : processingState}
+                </div>
+                
                 <div className="progress">
                   <span style={{ width: `${progress}%` }} />
                 </div>

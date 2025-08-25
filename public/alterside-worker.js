@@ -314,12 +314,12 @@ function processFiles(files) {
     // From ListPrice: ceil(((ListPrice × 1,22) + 5) × 1,08) × 1,05)
     const finalPriceListino = Math.ceil(((listPriceWithIVA + 5) * 1.08) * 1.05);
 
-    // Create base record
+    // Create base record - always use ManufPartNr from Material only
     const baseRecord = {
       Matnr: matnr,
-      ManufPartNr: combined.ManufPartNr || '',
-      EAN: combined.EAN?.toString().trim() || '',
-      ShortDescription: combined.ShortDescription || '',
+      ManufPartNr: materialRecord.ManufPartNr || '',
+      EAN: materialRecord.EAN?.toString().trim() || '',
+      ShortDescription: materialRecord.ShortDescription || '',
       ExistingStock: parseInt(existingStock),
       ListPrice: listPriceNum,
       CustBestPrice: custBestPriceCeil,
