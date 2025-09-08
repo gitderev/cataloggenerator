@@ -3,6 +3,8 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { toast } from '@/hooks/use-toast';
 import { Upload, Download, FileText, CheckCircle, XCircle, AlertCircle, Clock, Activity } from 'lucide-react';
+import { filterAndNormalizeForEAN, type EANStats, type DiscardedRow } from '@/utils/ean';
+import { forceEANText, exportDiscardedRowsCSV } from '@/utils/excelFormatter';
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
 
@@ -98,6 +100,8 @@ const AltersideCatalogGenerator: React.FC = () => {
   const [joinDone, setJoinDone] = useState(false);
   const [excelDone, setExcelDone] = useState(false);
   const [logDone, setLogDone] = useState(false);
+  const [eanStats, setEanStats] = useState<EANStats | null>(null);
+  const [discardedRows, setDiscardedRows] = useState<DiscardedRow[]>([]);
   
   // Debug events
   const [debugEvents, setDebugEvents] = useState<string[]>([]);
@@ -461,6 +465,8 @@ const AltersideCatalogGenerator: React.FC = () => {
     setCurrentLogEntries([]);
     setCurrentStats(null);
     setFinalTotal(null);
+    setEanStats(null);
+    setDiscardedRows([]);
     processedRef.current = 0;
     setProcessed(0);
     setProgressPct(0);
@@ -581,6 +587,15 @@ const AltersideCatalogGenerator: React.FC = () => {
       const integer = Math.floor(value);
       const decimal = value - integer;
       return decimal <= 0.99 ? integer + 0.99 : integer + 1.99;
+    };
+
+    const computeFinalPriceForEAN = (row: any): number => {
+      const custBestPrice = parseFloat(row.CustBestPrice);
+      if (!isFinite(custBestPrice)) return 0;
+      
+      const withIVA = Math.ceil(custBestPrice) * 1.22;
+      const feeBest = withIVA * 1.08 * 1.05;
+      return ceilToXX99(feeBest);
     };
 
     const finalize = () => {
@@ -774,11 +789,29 @@ const AltersideCatalogGenerator: React.FC = () => {
           // Progress tracking is already done above - don't double count
         },
         complete: () => {
-          setFinalTotal(processedRef.current);
-          setProcessed(processedRef.current);
-          setProgressPct(Math.min(99, Math.floor(processedRef.current / Math.max(1, processedRef.current) * 100)));
-          setJoinDone(true);
-          dbg('join:done', { processed: processedRef.current, totalPrescan: total, finalTotal: processedRef.current });
+        setFinalTotal(processedRef.current);
+        setProcessed(processedRef.current);
+        setProgressPct(Math.min(99, Math.floor(processedRef.current / Math.max(1, processedRef.current) * 100)));
+        
+        // Apply EAN validation and normalization for EAN pipeline
+        if (pipelineType === 'EAN') {
+          const { kept, discarded, stats } = filterAndNormalizeForEAN(processedEAN, computeFinalPriceForEAN);
+          processedEAN.length = 0; // clear original
+          processedEAN.push(...kept);
+          setEanStats(stats);
+          setDiscardedRows(discarded);
+          
+          audit('ean-validation', {
+            pipeline: pipelineType,
+            input: stats.tot_righe_input,
+            kept: kept.length,
+            discarded: discarded.length,
+            stats
+          });
+        }
+        
+        setJoinDone(true);
+        dbg('join:done', { processed: processedRef.current, totalPrescan: total, finalTotal: processedRef.current });
           resolve();
         },
         error: (err) => {
@@ -847,16 +880,26 @@ const AltersideCatalogGenerator: React.FC = () => {
 
     const excelData = formatExcelData(currentProcessedData);
     const ws = XLSX.utils.json_to_sheet(excelData);
+    
+    // Force EAN column to text format for both pipelines
+    forceEANText(ws);
+    
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
     XLSX.writeFile(wb, filename);
 
-    dbg('excel:write:done');
+    setExcelDone(true);
+    dbg('excel:write:done', { pipeline: type });
 
     toast({
       title: "Excel scaricato",
       description: `File ${filename} scaricato con successo`
     });
+  };
+
+  const downloadDiscardedRows = () => {
+    if (discardedRows.length === 0) return;
+    exportDiscardedRowsCSV(discardedRows, `righe_scartate_EAN_${new Date().toISOString().split('T')[0]}`);
   };
 
   const downloadLog = (type: 'ean' | 'manufpartnr') => {
@@ -882,7 +925,8 @@ const AltersideCatalogGenerator: React.FC = () => {
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
     XLSX.writeFile(wb, filename);
 
-    dbg('log:write:done');
+    setLogDone(true);
+    dbg('log:write:done', { pipeline: type });
 
     toast({
       title: "Log scaricato",
@@ -1233,6 +1277,38 @@ const AltersideCatalogGenerator: React.FC = () => {
                   <div className="text-sm text-muted">Duplicati</div>
                 </div>
               </div>
+              
+              {eanStats && currentPipeline === 'EAN' && (
+                <div className="mt-6">
+                  <h4 className="text-lg font-semibold mb-3">Validazione EAN</h4>
+                  <div className="grid grid-cols-3 gap-4 text-sm">
+                    <div className="text-center p-3 rounded-lg border" style={{ background: '#f0f9ff' }}>
+                      <div className="text-lg font-bold text-green-600">{eanStats.ean_validi_13}</div>
+                      <div className="text-muted-foreground">EAN validi (13 cifre)</div>
+                    </div>
+                    <div className="text-center p-3 rounded-lg border" style={{ background: '#eff6ff' }}>
+                      <div className="text-lg font-bold text-blue-600">{eanStats.ean_padded_12_to_13}</div>
+                      <div className="text-muted-foreground">EAN padded (12→13)</div>
+                    </div>
+                    <div className="text-center p-3 rounded-lg border" style={{ background: '#fff7ed' }}>
+                      <div className="text-lg font-bold text-orange-600">{eanStats.ean_duplicati_risolti}</div>
+                      <div className="text-muted-foreground">Duplicati risolti</div>
+                    </div>
+                    <div className="text-center p-3 rounded-lg border" style={{ background: '#fef2f2' }}>
+                      <div className="text-lg font-bold text-red-600">{eanStats.ean_mancanti}</div>
+                      <div className="text-muted-foreground">EAN mancanti</div>
+                    </div>
+                    <div className="text-center p-3 rounded-lg border" style={{ background: '#fef2f2' }}>
+                      <div className="text-lg font-bold text-red-600">{eanStats.ean_non_numerici}</div>
+                      <div className="text-muted-foreground">EAN non numerici</div>
+                    </div>
+                    <div className="text-center p-3 rounded-lg border" style={{ background: '#fef2f2' }}>
+                      <div className="text-lg font-bold text-red-600">{eanStats.ean_lunghezze_invalid}</div>
+                      <div className="text-muted-foreground">Lunghezze non valide</div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1256,6 +1332,15 @@ const AltersideCatalogGenerator: React.FC = () => {
                 <Download className="mr-3 h-5 w-5" />
                 SCARICA LOG ({currentPipeline})
               </button>
+              {discardedRows.length > 0 && currentPipeline === 'EAN' && (
+                <button 
+                  onClick={downloadDiscardedRows}
+                  className="btn btn-secondary text-lg px-8 py-3"
+                >
+                  <Download className="mr-3 h-5 w-5" />
+                  SCARTI EAN ({discardedRows.length})
+                </button>
+              )}
             </div>
           </div>
         )}
