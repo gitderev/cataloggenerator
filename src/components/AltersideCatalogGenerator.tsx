@@ -40,7 +40,7 @@ interface ProcessedRecord {
   FeeDeRev: number;
   'Fee Marketplace': number;
   'Subtotale post-fee': number;
-  'Prezzo Finale': number;
+  'Prezzo Finale': number | string; // String display for EAN (e.g. "34,99"), number for MPN
   'ListPrice con Fee': number | string; // Can be empty string for invalid ListPrice
 }
 
@@ -110,7 +110,8 @@ function computeFinalPrice({
   CustBestPrice, ListPrice, feeDrev, feeMkt
 }: { CustBestPrice?: number; ListPrice?: number; feeDrev: number; feeMkt: number; }): {
   base: number, shipping: number, iva: number, subtotConIva: number,
-  postFee: number, prezzoFinaleEAN: number, prezzoFinaleMPN: number, listPriceConFee: number | string
+  postFee: number, prezzoFinaleEAN: number, prezzoFinaleMPN: number, listPriceConFee: number | string,
+  eanResult: { finalCents: number; finalDisplay: string; route: string; debug: any }
 } {
   const shipping = 6.00;
   const ivaMultiplier = 1.22;
@@ -130,9 +131,10 @@ function computeFinalPrice({
     baseRoute = 'listprice_ceiled';
   } else {
     // No valid price
+    const emptyEanResult = { finalCents: 0, finalDisplay: '0,00', route: 'none', debug: {} };
     return { 
       base: 0, shipping, iva: 0, subtotConIva: 0, 
-      postFee: 0, prezzoFinaleEAN: 0, prezzoFinaleMPN: 0, listPriceConFee: '' 
+      postFee: 0, prezzoFinaleEAN: 0, prezzoFinaleMPN: 0, listPriceConFee: '', eanResult: emptyEanResult 
     };
   }
   
@@ -143,7 +145,11 @@ function computeFinalPrice({
   const postFee = subtotConIva * feeDrev * feeMkt;
   
   // EAN final price: use new computeFinalEan function (cent-precise with ending ,99)
-  const prezzoFinaleEAN = computeFinalEan(base, shipping, ivaMultiplier, feeDrev, feeMkt);
+  const eanResult = computeFinalEan(
+    { listPrice: ListPrice || 0, custBestPrice: CustBestPrice > 0 ? CustBestPrice : undefined },
+    { feeDeRev: feeDrev, feeMarketplace: feeMkt }
+  );
+  const prezzoFinaleEAN = eanResult.finalCents / 100;
   
   // MPN final price: use old logic (ceil to integer)
   const prezzoFinaleMPN = Math.ceil(postFee);
@@ -210,7 +216,7 @@ function computeFinalPrice({
     }
   }
 
-  return { base, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee };
+  return { base, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee, eanResult };
 }
 
 const AltersideCatalogGenerator: React.FC = () => {
@@ -753,9 +759,17 @@ const AltersideCatalogGenerator: React.FC = () => {
       const hasListPrice = Number.isFinite(listPrice) && listPrice > 0;
       
       if (hasBest) {
-        return computeFinalEan(custBestPrice, 6, 1.22, feeConfig.feeDrev, feeConfig.feeMkt);
+        const result = computeFinalEan(
+          { listPrice: listPrice || 0, custBestPrice },
+          { feeDeRev: feeConfig.feeDrev, feeMarketplace: feeConfig.feeMkt }
+        );
+        return result.finalCents / 100;
       } else if (hasListPrice) {
-        return computeFinalEan(Math.ceil(listPrice), 6, 1.22, feeConfig.feeDrev, feeConfig.feeMkt);
+        const result = computeFinalEan(
+          { listPrice },
+          { feeDeRev: feeConfig.feeDrev, feeMarketplace: feeConfig.feeMkt }
+        );
+        return result.finalCents / 100;
       }
       
       return 0;
@@ -933,11 +947,13 @@ const AltersideCatalogGenerator: React.FC = () => {
             FeeDeRev: feeConfig.feeDrev,
             'Fee Marketplace': feeConfig.feeMkt,
             'Subtotale post-fee': calc.postFee,
-            'Prezzo Finale': currentPipeline === 'EAN' ? calc.prezzoFinaleEAN : calc.prezzoFinaleMPN,
+            'Prezzo Finale': currentPipeline === 'EAN' ? calc.eanResult.finalDisplay : calc.prezzoFinaleMPN,
             'ListPrice con Fee': calc.listPriceConFee
           };
 
           if (base.EAN) {
+            // Add internal EAN metadata for validation
+            (base as any)._eanFinalCents = currentPipeline === 'EAN' ? calc.eanResult.finalCents : undefined;
             processedEAN.push(base);
           } else {
             const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: base.ManufPartNr, EAN: '', reason: 'ean_empty', details: 'EAN vuoto o mancante' };
@@ -1030,7 +1046,7 @@ const AltersideCatalogGenerator: React.FC = () => {
       'ListPrice con IVA': record['ListPrice con IVA'].toFixed(2).replace('.', ','),
       'CustBestPrice con IVA': record['CustBestPrice con IVA'].toFixed(2).replace('.', ','),
       'Costo di spedizione': record['Costo di spedizione'].toString(),
-      'Prezzo finale': record['Prezzo finale'].toFixed(2).replace('.', ','),
+      'Prezzo finale': typeof record['Prezzo finale'] === 'string' ? record['Prezzo finale'] : record['Prezzo finale'].toFixed(2).replace('.', ','),
       'Prezzo finale Listino': record['Prezzo finale Listino'].toString()
     }));
   };
@@ -1090,12 +1106,11 @@ const AltersideCatalogGenerator: React.FC = () => {
         const finalPrice = record['Prezzo Finale'];
         const lpFee = record['ListPrice con Fee'];
         
-        // Validate EAN ending ,99 - check the EXACT value that goes to Excel
-        if (typeof finalPrice === 'number') {
-          const isValid99 = validateEnding99(finalPrice);
+        // Validate EAN ending ,99 - check the internal cents value for precision
+        const internalCents = (record as any)._eanFinalCents;
+        if (typeof internalCents === 'number') {
+          const isValid99 = (internalCents % 100) === 99;
           if (!isValid99) {
-            const cents = Math.floor(finalPrice * 100 + 0.5);
-            
             // Determine route for debugging
             const custBest = record.CustBestPrice;
             const listPrice = record.ListPrice;
@@ -1109,8 +1124,8 @@ const AltersideCatalogGenerator: React.FC = () => {
               ean: record.EAN || 'N/A',
               route: route,
               basePrice: basePrice,
-              final: finalPrice,
-              cents: cents
+              finalDisplay: finalPrice,
+              finalCents: internalCents
             });
           }
         }
