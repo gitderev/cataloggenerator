@@ -9,6 +9,8 @@ export interface EANStats {
   tot_righe_input: number;
   ean_validi_13: number;
   ean_padded_12_to_13: number;
+  ean_trimmed_14_to_13: number;
+  ean_validi_14: number;
   ean_mancanti: number;
   ean_non_numerici: number;
   ean_lunghezze_invalid: number;
@@ -34,8 +36,19 @@ export function normalizeEAN(raw: unknown): EANResult {
     return { ok: false, reason: 'EAN contiene caratteri non numerici', original };
   }
 
-  if (compact.length === 13) return { ok: true, value: compact, original };
-  if (compact.length === 12) return { ok: true, value: '0' + compact, original };
+  if (compact.length === 12) {
+    return { ok: true, value: '0' + compact, original, reason: 'padded_12_to_13' };
+  }
+  if (compact.length === 13) {
+    return { ok: true, value: compact, original, reason: 'valid_13' };
+  }
+  if (compact.length === 14) {
+    if (compact.startsWith('0')) {
+      return { ok: true, value: compact.substring(1), original, reason: 'trimmed_14_to_13' };
+    } else {
+      return { ok: true, value: compact, original, reason: 'valid_14' };
+    }
+  }
 
   return { ok: false, reason: `EAN lunghezza ${compact.length} non valida`, original };
 }
@@ -50,6 +63,8 @@ export function filterAndNormalizeForEAN(
     tot_righe_input: rows.length,
     ean_validi_13: 0,
     ean_padded_12_to_13: 0,
+    ean_trimmed_14_to_13: 0,
+    ean_validi_14: 0,
     ean_mancanti: 0,
     ean_non_numerici: 0,
     ean_lunghezze_invalid: 0,
@@ -72,10 +87,15 @@ export function filterAndNormalizeForEAN(
       continue;
     }
     
-    if ((res.original ?? '').replace(/[\s-]+/g, '').length === 12) {
+    // Count based on the normalization reason
+    if (res.reason === 'padded_12_to_13') {
       stats.ean_padded_12_to_13++;
-    } else {
+    } else if (res.reason === 'valid_13') {
       stats.ean_validi_13++;
+    } else if (res.reason === 'trimmed_14_to_13') {
+      stats.ean_trimmed_14_to_13++;
+    } else if (res.reason === 'valid_14') {
+      stats.ean_validi_14++;
     }
 
     r.EAN = res.value!;

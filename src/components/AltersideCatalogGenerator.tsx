@@ -1439,7 +1439,7 @@ const AltersideCatalogGenerator: React.FC = () => {
               {eanStats && currentPipeline === 'EAN' && (
                 <div className="mt-6">
                   <h4 className="text-lg font-semibold mb-3">Validazione EAN</h4>
-                  <div className="grid grid-cols-3 gap-4 text-sm">
+                  <div className="grid grid-cols-4 gap-4 text-sm">
                     <div className="text-center p-3 rounded-lg border" style={{ background: '#f0f9ff' }}>
                       <div className="text-lg font-bold text-green-600">{eanStats.ean_validi_13}</div>
                       <div className="text-muted-foreground">EAN validi (13 cifre)</div>
@@ -1447,6 +1447,14 @@ const AltersideCatalogGenerator: React.FC = () => {
                     <div className="text-center p-3 rounded-lg border" style={{ background: '#eff6ff' }}>
                       <div className="text-lg font-bold text-blue-600">{eanStats.ean_padded_12_to_13}</div>
                       <div className="text-muted-foreground">EAN padded (12→13)</div>
+                    </div>
+                    <div className="text-center p-3 rounded-lg border" style={{ background: '#f0fdf4' }}>
+                      <div className="text-lg font-bold text-emerald-600">{eanStats.ean_trimmed_14_to_13}</div>
+                      <div className="text-muted-foreground">EAN trimmed (14→13)</div>
+                    </div>
+                    <div className="text-center p-3 rounded-lg border" style={{ background: '#fefce8' }}>
+                      <div className="text-lg font-bold text-yellow-600">{eanStats.ean_validi_14}</div>
+                      <div className="text-muted-foreground">EAN validi (14 cifre)</div>
                     </div>
                     <div className="text-center p-3 rounded-lg border" style={{ background: '#fff7ed' }}>
                       <div className="text-lg font-bold text-orange-600">{eanStats.ean_duplicati_risolti}</div>
