@@ -35,12 +35,12 @@ interface ProcessedRecord {
   CustBestPrice: number;
   'Costo di Spedizione': number;
   IVA: number;
-  'Subtotale Prezzo con Spedizione e IVA': number;
+  'Prezzo con spediz e IVA': number;
   FeeDeRev: number;
   'Fee Marketplace': number;
   'Subtotale post-fee': number;
-  'IVA ': number; // Duplicated column as per spec
   'Prezzo Finale': number;
+  'ListPrice con Fee': number | string; // Can be empty string for invalid ListPrice
 }
 
 interface FeeConfig {
@@ -114,7 +114,7 @@ function computeFinalPrice({
   CustBestPrice, ListPrice, feeDrev, feeMkt
 }: { CustBestPrice?: number; ListPrice?: number; feeDrev: number; feeMkt: number; }): {
   base: number, shipping: number, iva: number, subtotConIva: number,
-  postFee: number, prezzoFinaleEAN: number, prezzoFinaleMPN: number
+  postFee: number, prezzoFinaleEAN: number, prezzoFinaleMPN: number, listPriceConFee: number | string
 } {
   const shipping = 6.00;
   const hasBest = Number.isFinite(CustBestPrice) && CustBestPrice! > 0;
@@ -130,7 +130,12 @@ function computeFinalPrice({
   const prezzoFinaleEAN = toComma99(postFee);
   const prezzoFinaleMPN = ceilInt(postFee);
 
-  return { base: base0, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN };
+  // Calculate ListPrice con Fee
+  const listPriceConFee = (ListPrice && Number.isFinite(ListPrice) && ListPrice > 0) 
+    ? Math.ceil(ListPrice * feeMkt) 
+    : '';
+
+  return { base: base0, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee };
 }
 
 const AltersideCatalogGenerator: React.FC = () => {
@@ -845,12 +850,12 @@ const AltersideCatalogGenerator: React.FC = () => {
             CustBestPrice: calc.base,
             'Costo di Spedizione': calc.shipping,
             IVA: calc.iva,
-            'Subtotale Prezzo con Spedizione e IVA': calc.subtotConIva,
+            'Prezzo con spediz e IVA': calc.subtotConIva,
             FeeDeRev: feeConfig.feeDrev,
             'Fee Marketplace': feeConfig.feeMkt,
             'Subtotale post-fee': calc.postFee,
-            'IVA ': calc.iva, // Duplicated column as per spec
-            'Prezzo Finale': currentPipeline === 'EAN' ? calc.prezzoFinaleEAN : calc.prezzoFinaleMPN
+            'Prezzo Finale': currentPipeline === 'EAN' ? calc.prezzoFinaleEAN : calc.prezzoFinaleMPN,
+            'ListPrice con Fee': calc.listPriceConFee
           };
 
           if (base.EAN) {
@@ -987,13 +992,13 @@ const AltersideCatalogGenerator: React.FC = () => {
         CustBestPrice: record.CustBestPrice,
         'Costo di Spedizione': record['Costo di Spedizione'],
         IVA: record.IVA,
-        'Subtotale Prezzo con Spedizione e IVA': record['Subtotale Prezzo con Spedizione e IVA'],
+        'Prezzo con spediz e IVA': record['Prezzo con spediz e IVA'],
         FeeDeRev: record.FeeDeRev,
         'Fee Marketplace': record['Fee Marketplace'],
         'Subtotale post-fee': record['Subtotale post-fee'],
-        'IVA ': record['IVA '], // Duplicated column as per spec
         'Prezzo Finale': record['Prezzo Finale'],
-        ListPrice: record.ListPrice
+        ListPrice: record.ListPrice,
+        'ListPrice con Fee': record['ListPrice con Fee']
       }));
       
       // Create worksheet
@@ -1316,8 +1321,8 @@ const AltersideCatalogGenerator: React.FC = () => {
                   <li>• <strong>Filtri comuni:</strong> ExistingStock &gt; 1, prezzi numerici validi</li>
                   <li>• <strong>Export EAN:</strong> solo record con EAN non vuoto</li>
                   <li>• <strong>Export ManufPartNr:</strong> solo record con ManufPartNr non vuoto</li>
-                  <li>• <strong>Prezzi:</strong> CustBestPrice arrotondato per eccesso, IVA 22%, commissioni 8% + 5%</li>
-                  <li>• <strong>Prezzo finale:</strong> arrotondamento a ,99 (da Best) o intero superiore (da Listino)</li>
+                  <li>• <strong>Prezzi:</strong> Base + spedizione (€6), IVA 22%, fee sequenziali configurabili</li>
+                  <li>• <strong>Prezzo finale EAN:</strong> ending ,99; <strong>ManufPartNr:</strong> arrotondamento intero superiore</li>
                 </ul>
               </div>
             </div>
