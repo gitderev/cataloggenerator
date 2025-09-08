@@ -143,10 +143,32 @@ function computeFinalPrice({
     (globalThis as any).eanCalcSampleCount++;
   }
 
-  // Calculate ListPrice con Fee
-  const listPriceConFee = (ListPrice && Number.isFinite(ListPrice) && ListPrice > 0) 
-    ? Math.ceil(ListPrice * feeMkt) 
-    : '';
+  // Calculate ListPrice con Fee - full pipeline independent from main calculation
+  let listPriceConFee: number | string = '';
+  if (ListPrice && Number.isFinite(ListPrice) && ListPrice > 0) {
+    const baseLP = Number(ListPrice);
+    const subtotBasSpedLP = baseLP + shipping;
+    const ivaLP = subtotBasSpedLP * 0.22;
+    const subtotConIvaLP = subtotBasSpedLP + ivaLP;
+    const postFeeLP = subtotConIvaLP * feeDrev * feeMkt;
+    listPriceConFee = Math.ceil(postFeeLP);
+    
+    // Log samples for debugging (static counter to avoid spam)
+    if (typeof (globalThis as any).lpfeeCalcSampleCount === 'undefined') {
+      (globalThis as any).lpfeeCalcSampleCount = 0;
+    }
+    if ((globalThis as any).lpfeeCalcSampleCount < 3) {
+      console.warn('lpfee:calc:sample', { 
+        listPrice: baseLP, 
+        subtot_con_iva: subtotConIvaLP.toFixed(2), 
+        feeDeRev: feeDrev, 
+        feeMarketplace: feeMkt, 
+        post_fee: postFeeLP.toFixed(4), 
+        final: listPriceConFee 
+      });
+      (globalThis as any).lpfeeCalcSampleCount++;
+    }
+  }
 
   return { base: base0, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee };
 }
@@ -1017,10 +1039,14 @@ const AltersideCatalogGenerator: React.FC = () => {
       // Pre-export validation for EAN ending ,99
       const sampleSize = Math.min(200, dataset.length);
       const failedSamples: any[] = [];
+      const lpfeeFailedSamples: any[] = [];
       
       for (let i = 0; i < sampleSize; i++) {
         const record = dataset[i];
         const finalPrice = record['Prezzo Finale'];
+        const lpFee = record['ListPrice con Fee'];
+        
+        // Validate EAN ending ,99
         if (typeof finalPrice === 'number') {
           const isValid99 = Math.round((finalPrice * 100) % 100) === 99;
           if (!isValid99) {
@@ -1028,6 +1054,17 @@ const AltersideCatalogGenerator: React.FC = () => {
               index: i,
               final: finalPrice,
               expectedEnding: '0.99'
+            });
+          }
+        }
+        
+        // Validate ListPrice con Fee is integer
+        if (typeof lpFee === 'number') {
+          if (!Number.isInteger(lpFee)) {
+            lpfeeFailedSamples.push({
+              index: i,
+              value: lpFee,
+              expected: 'integer'
             });
           }
         }
@@ -1043,7 +1080,18 @@ const AltersideCatalogGenerator: React.FC = () => {
         return;
       }
       
+      if (lpfeeFailedSamples.length > 0) {
+        console.warn('AUDIT: lpfee:integer:fail', { failed: lpfeeFailedSamples.slice(0, 3) });
+        toast({
+          title: "Errore validazione ListPrice con Fee",
+          description: "ListPrice con Fee deve essere sempre un numero intero. Correggere e riprovare.",
+          variant: "destructive"
+        });
+        return;
+      }
+      
       console.warn('AUDIT: ean-ending:ok', { validated: sampleSize, total: dataset.length });
+      console.warn('lpfee:integer:ok', { validated: sampleSize, total: dataset.length });
       
       // Create worksheet
       const ws = XLSX.utils.json_to_sheet(dataset, { skipHeader: false });
