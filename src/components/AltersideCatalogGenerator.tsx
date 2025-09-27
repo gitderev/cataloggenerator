@@ -484,6 +484,7 @@ const AltersideCatalogGenerator = () => {
                 onClick={handleEanGeneration}
                 disabled={isProcessing || !allFilesValid}
                 className="h-12"
+                data-button="ean"
               >
                 <Download className="mr-2 h-4 w-4" />
                 GENERA EXCEL (EAN)
@@ -493,6 +494,7 @@ const AltersideCatalogGenerator = () => {
                 onClick={handleSkuGeneration}
                 disabled={isProcessing || !allFilesValid}
                 className="h-12"
+                data-button="sku"
               >
                 <Download className="mr-2 h-4 w-4" />
                 GENERA EXCEL (ManufPartNr)
@@ -535,23 +537,37 @@ const AltersideCatalogGenerator = () => {
                 <div className="text-xs font-mono space-y-1">
                   {(() => {
                     const bg = getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
-                    const card = getComputedStyle(document.documentElement).getPropertyValue('--card').trim();
-                    const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim();
+                    const primary = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim();
+                    const ring = getComputedStyle(document.documentElement).getPropertyValue('--ring').trim();
+                    
+                    // Get button styles
+                    const btnSku = document.querySelector('[data-button="sku"]') as HTMLElement;
+                    const btnEan = document.querySelector('[data-button="ean"]') as HTMLElement;
                     
                     return (
                       <>
-                         <div className={bg === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
-                           --background: "{bg}" {bg === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
-                         </div>
-                         <div className={card === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
-                           --card: "{card}" {card === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
-                         </div>
-                         <div className={muted === '210 40% 96%' ? 'text-green-600' : 'text-red-600'}>
-                           --muted: "{muted}" {muted === '210 40% 96%' ? '✓' : '✗ Expected: "210 40% 96%"'}
-                         </div>
-                         <div className="mt-2 text-muted-foreground">
-                           body.backgroundColor: {getComputedStyle(document.body).backgroundColor}
-                         </div>
+                        <div className={bg === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
+                          --background: "{bg}" {bg === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
+                        </div>
+                        <div className={primary === '221.2 83.2% 53.3%' ? 'text-green-600' : 'text-red-600'}>
+                          --primary: "{primary}" {primary === '221.2 83.2% 53.3%' ? '✓' : '✗ Expected: "221.2 83.2% 53.3%"'}
+                        </div>
+                        <div className={ring === '221.2 83.2% 53.3%' ? 'text-green-600' : 'text-red-600'}>
+                          --ring: "{ring}" {ring === '221.2 83.2% 53.3%' ? '✓' : '✗ Expected: "221.2 83.2% 53.3%"'}
+                        </div>
+                        <div className="mt-2 text-muted-foreground">
+                          body.backgroundColor: {getComputedStyle(document.body).backgroundColor}
+                        </div>
+                        {btnSku && (
+                          <div className="mt-1 text-muted-foreground">
+                            btnSku.color: {getComputedStyle(btnSku).color} | bg: {getComputedStyle(btnSku).backgroundColor}
+                          </div>
+                        )}
+                        {btnEan && (
+                          <div className="mt-1 text-muted-foreground">
+                            btnEan.color: {getComputedStyle(btnEan).color} | bg: {getComputedStyle(btnEan).backgroundColor}
+                          </div>
+                        )}
                       </>
                     );
                   })()}

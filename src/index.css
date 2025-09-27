@@ -16,16 +16,16 @@
     --popover-foreground: 222.2 47.4% 11.2%;
 
     /* Primary blue for buttons and accents */
-    --primary: 37 99 235;
-    --primary-foreground: 255 255 255;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
 
     /* Secondary gray for less important elements */
-    --secondary: 245 245 245;
-    --secondary-foreground: 60 60 60;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
 
     /* High contrast accent colors */
-    --accent: 239 246 255;
-    --accent-foreground: 30 58 138;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222.2 47.4% 11.2%;
 
     /* Success green for valid states */
     --success: 34 197 94;
@@ -38,7 +38,7 @@
     /* Strong borders for flat design */
     --border: 200 200 200;
     --input: 200 200 200;
-    --ring: 37 99 235;
+    --ring: 221.2 83.2% 53.3%;
 
     /* High contrast progress colors */
     --progress-bg: 230 230 230;
