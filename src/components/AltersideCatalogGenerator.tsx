@@ -2795,6 +2795,68 @@ function processSkuRow(row, feeDeRevPercent, feeMktPercent, rejects, rowIndex) {
         {allFilesValid && (
           <div className="text-center">
             <h3 className="text-2xl font-bold mb-6">Azioni</h3>
+            
+            {/* Diagnostic Toggle and Force Visibility Logic */}
+            {(() => {
+              // Force visibility checks
+              const urlParams = new URLSearchParams(window.location.search);
+              const urlDiagFlag = urlParams.get('diag') === '1';
+              const localStorageDiagFlag = localStorage.getItem('diag') === '1';
+              const diagForceVisible = urlDiagFlag || localStorageDiagFlag;
+              
+              // Main visibility condition
+              const shouldShowDiagnostic = diagForceVisible || true; // Always show for now
+              
+              // Debug info to console
+              console.log('DIAGNOSTIC_TOGGLE_DEBUG:', {
+                condition: `diagForceVisible=${diagForceVisible} || true`,
+                urlDiagFlag,
+                localStorageDiagFlag,
+                diagForceVisible,
+                shouldShowDiagnostic,
+                allFilesValid,
+                diagnosticStateEnabled: diagnosticState.isEnabled
+              });
+              
+              return shouldShowDiagnostic ? (
+                <div className="mb-6 p-4 border border-strong rounded-lg bg-muted">
+                  <div className="flex items-center justify-center gap-4 mb-4">
+                    <label htmlFor="diagnostic-mode" className="text-sm font-medium">
+                      Modalità diagnostica
+                    </label>
+                    <input
+                      id="diagnostic-mode"
+                      type="checkbox"
+                      checked={diagnosticState.isEnabled}
+                      onChange={(e) => {
+                        setDiagnosticState(prev => ({
+                          ...prev,
+                          isEnabled: e.target.checked
+                        }));
+                        if (e.target.checked && diagForceVisible) {
+                          localStorage.setItem('diag', '1');
+                        }
+                      }}
+                      className="w-4 h-4"
+                    />
+                  </div>
+                  
+                  {diagnosticState.isEnabled && (
+                    <div className="flex justify-center">
+                      <button
+                        onClick={runDiagnosticSku}
+                        disabled={!(debugState.materialValid && debugState.stockValid && debugState.priceValid) || isExportingSKU}
+                        className={`btn btn-secondary text-lg px-8 py-3 ${!canProcess || isExportingSKU ? 'is-disabled' : ''}`}
+                      >
+                        <Upload className="mr-2 h-5 w-5" />
+                        Diagnostica prescan
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : null;
+            })()}
+            
             <div className="flex flex-wrap justify-center gap-6">
               <button
                 onClick={() => processDataPipeline('EAN')}
@@ -2920,6 +2982,34 @@ function processSkuRow(row, feeDeRevPercent, feeMktPercent, rejects, rowIndex) {
                 Eventi Debug
               </h3>
               
+              {/* Diagnostic Toggle Debug Info */}
+              {(() => {
+                const urlParams = new URLSearchParams(window.location.search);
+                const urlDiagFlag = urlParams.get('diag') === '1';
+                const localStorageDiagFlag = localStorage.getItem('diag') === '1';
+                const diagForceVisible = urlDiagFlag || localStorageDiagFlag;
+                const shouldShowDiagnostic = diagForceVisible || true;
+                
+                return (
+                  <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                    <h4 className="text-sm font-medium mb-2">Condizioni Toggle Diagnostica</h4>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div>Condizione completa: <code>diagForceVisible || true</code></div>
+                      <div>Risultato: <strong>{shouldShowDiagnostic ? 'TRUE' : 'FALSE'}</strong></div>
+                      <div>URL ?diag=1: <strong>{urlDiagFlag ? 'TRUE' : 'FALSE'}</strong></div>
+                      <div>localStorage diag=1: <strong>{localStorageDiagFlag ? 'TRUE' : 'FALSE'}</strong></div>
+                      <div>diagForceVisible: <strong>{diagForceVisible ? 'TRUE' : 'FALSE'}</strong></div>
+                      <div>allFilesValid: <strong>{allFilesValid ? 'TRUE' : 'FALSE'}</strong></div>
+                      <div>diagnosticState.isEnabled: <strong>{diagnosticState.isEnabled ? 'TRUE' : 'FALSE'}</strong></div>
+                      <div>Container: /Azioni (stesso blocco)</div>
+                    </div>
+                    <div className="mt-2 text-xs">
+                      <strong>Per forza visibilità:</strong> aggiungi ?diag=1 alla URL o imposta localStorage.setItem('diag', '1')
+                    </div>
+                  </div>
+                );
+              })()}
+              
               <textarea
                 value={debugEvents.join('\n')}
                 readOnly
@@ -2937,13 +3027,108 @@ function processSkuRow(row, feeDeRevPercent, feeMktPercent, rejects, rowIndex) {
                     Pulisci log
                   </button>
                 </div>
-              )}
-            </div>
-          </div>
-        )}
+               )}
+             </div>
+           </div>
+         )}
 
-        {/* Statistics */}
-        {currentStats && (
+         {/* Diagnostic Panels */}
+         {diagnosticState.isEnabled && (
+           <>
+             {/* Worker Messages Panel */}
+             <div className="card border-strong">
+               <div className="card-body">
+                 <h3 className="card-title mb-4 flex items-center gap-2">
+                   <AlertCircle className="h-5 w-5 icon-dark" />
+                   Messaggi Worker (primi 10)
+                 </h3>
+                 
+                 <div className="space-y-2 max-h-64 overflow-y-auto">
+                   {diagnosticState.workerMessages.length === 0 ? (
+                     <div className="text-sm text-muted">Nessun messaggio worker ricevuto</div>
+                   ) : (
+                     diagnosticState.workerMessages.map((msg, index) => (
+                       <div key={msg.id} className="p-2 bg-muted rounded text-xs">
+                         <div className="font-mono">
+                           <strong>worker_msg #{index + 1}:</strong> [{msg.timestamp}] {JSON.stringify(msg.data)}
+                         </div>
+                       </div>
+                     ))
+                   )}
+                 </div>
+               </div>
+             </div>
+
+             {/* Diagnostic Statistics Panel */}
+             <div className="card border-strong">
+               <div className="card-body">
+                 <h3 className="card-title mb-4 flex items-center gap-2">
+                   <Activity className="h-5 w-5 icon-dark" />
+                   Statistiche Diagnostiche
+                   {(() => {
+                     const heartbeatAge = diagnosticState.lastHeartbeat ? Date.now() - diagnosticState.lastHeartbeat : 0;
+                     const heartbeatColor = heartbeatAge < 2000 ? 'green' : heartbeatAge < 5000 ? 'yellow' : 'red';
+                     return (
+                       <span className={`ml-2 w-3 h-3 rounded-full bg-${heartbeatColor}-500`} title={`Heartbeat: ${heartbeatAge}ms fa`}></span>
+                     );
+                   })()}
+                 </h3>
+                 
+                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Total</div>
+                     <div className="text-lg">{diagnosticState.statistics.total}</div>
+                   </div>
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Batch Size</div>
+                     <div className="text-lg">{diagnosticState.statistics.batchSize}</div>
+                   </div>
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Progress %</div>
+                     <div className="text-lg">{progressPct}%</div>
+                   </div>
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Elapsed Prescan</div>
+                     <div className="text-lg">{diagnosticState.statistics.elapsedPrescan}ms</div>
+                   </div>
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Elapsed SKU</div>
+                     <div className="text-lg">{diagnosticState.statistics.elapsedSku}ms</div>
+                   </div>
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Heartbeat Age</div>
+                     <div className="text-lg">{diagnosticState.lastHeartbeat ? Date.now() - diagnosticState.lastHeartbeat : 0}ms</div>
+                   </div>
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Msg Invalid</div>
+                     <div className="text-lg">{diagnosticState.errorCounters.msgInvalid}</div>
+                   </div>
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Worker Errors</div>
+                     <div className="text-lg">{diagnosticState.errorCounters.workerError}</div>
+                   </div>
+                   <div className="p-3 bg-muted rounded">
+                     <div className="font-medium">Timeouts</div>
+                     <div className="text-lg">{diagnosticState.errorCounters.timeouts}</div>
+                   </div>
+                 </div>
+
+                 {/* Diagnostic Bundle */}
+                 <div className="mt-4 pt-4 border-t border-strong">
+                   <button
+                     onClick={generateDiagnosticBundle}
+                     className="btn btn-secondary"
+                   >
+                     Copia diagnostica
+                   </button>
+                 </div>
+               </div>
+             </div>
+           </>
+         )}
+
+         {/* Statistics */}
+         {currentStats && (
           <div className="card border-strong">
             <div className="card-body">
               <h3 className="card-title mb-6">Statistiche Elaborazione - Pipeline {currentPipeline}</h3>
