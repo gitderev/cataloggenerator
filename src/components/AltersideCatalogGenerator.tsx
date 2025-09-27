@@ -109,8 +109,9 @@ const AltersideCatalogGenerator = () => {
     addDebugEvent(`css_vars: --background="${vars.background}", --card="${vars.card}", --muted="${vars.muted}", --primary="${vars.primary}", --ring="${vars.ring}", --input="${vars.input}"`);
     addDebugEvent(`body_bg: ${bodyBg}`);
     
-    // Button probe after render
+    // Button and input probes after render
     setTimeout(() => {
+      // Button probes
       ['btn-ean', 'btn-sku', 'btn-diag'].forEach(btnId => {
         const btn = document.querySelector(`[data-id="${btnId}"]`) as HTMLElement;
         if (btn) {
@@ -118,6 +119,15 @@ const AltersideCatalogGenerator = () => {
           addDebugEvent(`btn_${btnId}: exists=true, display="${styles.display}", visibility="${styles.visibility}", opacity="${styles.opacity}", pointerEvents="${styles.pointerEvents}", color="${styles.color}", backgroundColor="${styles.backgroundColor}"`);
         } else {
           addDebugEvent(`btn_${btnId}: missing_in_dom`);
+        }
+      });
+      
+      // Input Fee probes
+      ['fee-derev', 'fee-marketplace'].forEach(inputId => {
+        const input = document.querySelector(`#${inputId}`) as HTMLElement;
+        if (input) {
+          const styles = getComputedStyle(input);
+          addDebugEvent(`input_${inputId}: background="${styles.backgroundColor}", borderColor="${styles.borderColor}"`);
         }
       });
     }, 100);
@@ -497,7 +507,7 @@ const AltersideCatalogGenerator = () => {
           />
         </div>
 
-        {/* Actions - ALWAYS RENDERED */}
+        {/* Actions - ALWAYS RENDERED (no gating) */}
         <Card className="mb-6 p-6">
           <div className="space-y-4">
             

@@ -36,7 +36,7 @@ export const CalculationRules: React.FC<CalculationRulesProps> = ({
               min="1.00"
               value={feeDeRev}
               onChange={(e) => onFeeDeRevChange(Math.max(1.00, parseFloat(e.target.value) || 1.00))}
-              className="pl-8"
+              className="pl-8 border-input focus-visible:ring-ring focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               placeholder="1,00"
             />
           </div>
@@ -53,7 +53,7 @@ export const CalculationRules: React.FC<CalculationRulesProps> = ({
               min="1.00"
               value={feeMarketplace}
               onChange={(e) => onFeeMarketplaceChange(Math.max(1.00, parseFloat(e.target.value) || 1.00))}
-              className="pl-8"
+              className="pl-8 border-input focus-visible:ring-ring focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               placeholder="1,00"
             />
           </div>

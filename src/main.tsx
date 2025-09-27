@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Toaster } from "@/components/ui/toaster";
 import "./index.css";
 import "./custom.css";
+import "./theme-reset.css"; /* Final theme override - loads last */
 
 import Index from "./pages/Index.tsx";
 import WorkerTestPage from "./pages/WorkerTest.tsx";
