@@ -64,7 +64,7 @@ export const CalculationRules: React.FC<CalculationRulesProps> = ({
         <h4 className="font-medium mb-2">Regole Applicate:</h4>
         <ul className="text-sm text-muted-foreground space-y-1">
           <li>• SKU: righe con ManufPartNr non vuoto, anche con EAN vuoto</li>
-          <li>• Filtro: ExistingStock &gt; 1</li>
+          <li>• Filtro: ExistingStock {'>'} 1</li>
           <li>• Prezzo base: CustBestPrice, fallback ListPrice</li>
           <li>• Spedizione: 6€ fissi</li>
           <li>• IVA: 22% percentuale fissa</li>
