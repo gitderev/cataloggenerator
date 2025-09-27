@@ -48,12 +48,15 @@ const AltersideCatalogGenerator = () => {
   const pingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   const [diagnosticState, setDiagnosticState] = useState({
+    isEnabled: false,
     workerMessages: [],
     statistics: {
       total: 0,
       batchSize: 1000,
       elapsedPrescan: 0,
-      elapsedSku: 0
+      elapsedSku: 0,
+      progressPct: 0,
+      heartbeatAgeMs: 0
     },
     errorCounters: {
       msgInvalid: 0,
@@ -74,6 +77,16 @@ const AltersideCatalogGenerator = () => {
   });
 
   const [debugEvents, setDebugEvents] = useState<string[]>([]);
+
+  // Add debug event utility
+  const addDebugEvent = useCallback((event: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const eventWithTime = `[${timestamp}] ${event}`;
+    setDebugEvents(prev => {
+      const updated = [...prev, eventWithTime];
+      return updated.length > 200 ? updated.slice(-200) : updated;
+    });
+  }, []);
 
   // Update ready states when data changes
   useEffect(() => {
@@ -457,8 +470,11 @@ const AltersideCatalogGenerator = () => {
             <div className="flex items-center space-x-2 pb-4 border-b">
               <Checkbox 
                 id="diagnostic-mode"
-                checked={isDiagnosticMode}
-                onCheckedChange={(checked) => setIsDiagnosticMode(checked === true)}
+                checked={diagnosticState.isEnabled}
+                onCheckedChange={(checked) => {
+                  setDiagnosticState(prev => ({ ...prev, isEnabled: checked === true }));
+                  addDebugEvent(`state:change diagnostic_mode=${checked}`);
+                }}
               />
               <label htmlFor="diagnostic-mode" className="text-sm font-medium">
                 Modalità diagnostica
@@ -466,9 +482,12 @@ const AltersideCatalogGenerator = () => {
             </div>
             
             {/* Diagnostic Prescan Button - Only exists in DOM when diagnostic mode ON */}
-            {isDiagnosticMode && (
+            {diagnosticState.isEnabled && (
               <Button
-                onClick={handleDiagnosticPrescan}
+                onClick={() => {
+                  addDebugEvent('click_diag');
+                  handleDiagnosticPrescan();
+                }}
                 disabled={isProcessing}
                 variant="outline"
                 className="w-full"
@@ -481,7 +500,10 @@ const AltersideCatalogGenerator = () => {
             {/* Main Action Buttons */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <Button
-                onClick={handleEanGeneration}
+                onClick={() => {
+                  addDebugEvent('click_ean');
+                  handleEanGeneration();
+                }}
                 disabled={isProcessing || !allFilesValid}
                 className="h-12"
                 data-button="ean"
@@ -491,7 +513,10 @@ const AltersideCatalogGenerator = () => {
               </Button>
 
               <Button
-                onClick={handleSkuGeneration}
+                onClick={() => {
+                  addDebugEvent('click_sku');
+                  handleSkuGeneration();
+                }}
                 disabled={isProcessing || !allFilesValid}
                 className="h-12"
                 data-button="sku"
@@ -525,7 +550,7 @@ const AltersideCatalogGenerator = () => {
         </Card>
 
         {/* Debug/Diagnostica - Only visible when diagnostic mode ON */}
-        {isDiagnosticMode && (
+        {diagnosticState.isEnabled && (
           <div className="space-y-6">
             {/* Eventi Debug */}
             <Card className="p-6">
@@ -533,12 +558,15 @@ const AltersideCatalogGenerator = () => {
               
               {/* Runtime CSS Variables Validation */}
               <div className="mb-4 p-3 bg-muted rounded border">
-                <h4 className="font-medium text-sm mb-2">Validazione CSS Variables</h4>
+                <h4 className="font-medium text-sm mb-2 text-foreground">Validazione CSS Variables</h4>
                 <div className="text-xs font-mono space-y-1">
                   {(() => {
                     const bg = getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
+                    const card = getComputedStyle(document.documentElement).getPropertyValue('--card').trim();
+                    const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim();
                     const primary = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim();
                     const ring = getComputedStyle(document.documentElement).getPropertyValue('--ring').trim();
+                    const input = getComputedStyle(document.documentElement).getPropertyValue('--input').trim();
                     
                     // Get button styles
                     const btnSku = document.querySelector('[data-button="sku"]') as HTMLElement;
@@ -549,11 +577,20 @@ const AltersideCatalogGenerator = () => {
                         <div className={bg === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
                           --background: "{bg}" {bg === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
                         </div>
+                        <div className={card === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
+                          --card: "{card}" {card === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
+                        </div>
+                        <div className={muted === '210 40% 96%' ? 'text-green-600' : 'text-red-600'}>
+                          --muted: "{muted}" {muted === '210 40% 96%' ? '✓' : '✗ Expected: "210 40% 96%"'}
+                        </div>
                         <div className={primary === '221.2 83.2% 53.3%' ? 'text-green-600' : 'text-red-600'}>
                           --primary: "{primary}" {primary === '221.2 83.2% 53.3%' ? '✓' : '✗ Expected: "221.2 83.2% 53.3%"'}
                         </div>
                         <div className={ring === '221.2 83.2% 53.3%' ? 'text-green-600' : 'text-red-600'}>
                           --ring: "{ring}" {ring === '221.2 83.2% 53.3%' ? '✓' : '✗ Expected: "221.2 83.2% 53.3%"'}
+                        </div>
+                        <div className={input === '200 200 200' ? 'text-green-600' : 'text-red-600'}>
+                          --input: "{input}" {input === '200 200 200' ? '✓' : '✗ Expected: "200 200 200"'}
                         </div>
                         <div className="mt-2 text-muted-foreground">
                           body.backgroundColor: {getComputedStyle(document.body).backgroundColor}
@@ -579,7 +616,7 @@ const AltersideCatalogGenerator = () => {
                   <div className="text-muted-foreground text-sm">Nessun evento registrato</div>
                 ) : (
                   debugEvents.map((event, index) => (
-                    <div key={index} className="text-sm font-mono">{event}</div>
+                    <div key={index} className="text-sm font-mono text-foreground">{event}</div>
                   ))
                 )}
               </div>
@@ -587,13 +624,13 @@ const AltersideCatalogGenerator = () => {
 
             {/* Messaggi Worker (primi 10) */}
             <Card className="p-6">
-              <h3 className="text-lg font-semibold mb-4">Messaggi Worker (primi 10)</h3>
+              <h3 className="text-lg font-semibold mb-4 text-foreground">Messaggi Worker (primi 10)</h3>
               <div className="bg-muted p-3 rounded max-h-32 overflow-y-auto">
                 {diagnosticState.workerMessages.length === 0 ? (
                   <div className="text-muted-foreground text-sm">Nessun messaggio ricevuto</div>
                 ) : (
                   diagnosticState.workerMessages.slice(0, 10).map((msg: any) => (
-                    <div key={msg.id} className="text-sm font-mono mb-1">
+                    <div key={msg.id} className="text-sm font-mono mb-1 text-foreground">
                       [{msg.timestamp}] {JSON.stringify(msg.data)}
                     </div>
                   ))
@@ -603,30 +640,50 @@ const AltersideCatalogGenerator = () => {
 
             {/* Statistiche Diagnostiche */}
             <Card className="p-6">
-              <h3 className="text-lg font-semibold mb-4">Statistiche Diagnostiche</h3>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <h3 className="text-lg font-semibold mb-4 text-foreground">Statistiche Diagnostiche</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="p-3 bg-muted rounded">
-                  <div className="font-medium">Worker Strategy</div>
-                  <div className="text-lg">{workerStrategy}</div>
+                  <div className="font-medium text-foreground">Total</div>
+                  <div className="text-lg text-foreground">{diagnosticState.statistics.total}</div>
                 </div>
                 <div className="p-3 bg-muted rounded">
-                  <div className="font-medium">Stato</div>
-                  <div className="text-lg">{processingState}</div>
+                  <div className="font-medium text-foreground">BatchSize</div>
+                  <div className="text-lg text-foreground">{diagnosticState.statistics.batchSize}</div>
                 </div>
                 <div className="p-3 bg-muted rounded">
-                  <div className="font-medium">Progresso</div>
-                  <div className="text-lg">{progressPct}%</div>
+                  <div className="font-medium text-foreground">Elapsed Prescan</div>
+                  <div className="text-lg text-foreground">{diagnosticState.statistics.elapsedPrescan}ms</div>
                 </div>
                 <div className="p-3 bg-muted rounded">
-                  <div className="font-medium">Messaggi</div>
-                  <div className="text-lg">{diagnosticState.workerMessages.length}</div>
+                  <div className="font-medium text-foreground">Elapsed SKU</div>
+                  <div className="text-lg text-foreground">{diagnosticState.statistics.elapsedSku}ms</div>
+                </div>
+                <div className="p-3 bg-muted rounded">
+                  <div className="font-medium text-foreground">Progress %</div>
+                  <div className="text-lg text-foreground">{diagnosticState.statistics.progressPct}%</div>
+                </div>
+                <div className="p-3 bg-muted rounded">
+                  <div className="font-medium text-foreground">Heartbeat Age</div>
+                  <div className="text-lg text-foreground">{diagnosticState.statistics.heartbeatAgeMs}ms</div>
+                </div>
+                <div className="p-3 bg-muted rounded">
+                  <div className="font-medium text-foreground">Msg Invalid</div>
+                  <div className="text-lg text-foreground">{diagnosticState.errorCounters.msgInvalid}</div>
+                </div>
+                <div className="p-3 bg-muted rounded">
+                  <div className="font-medium text-foreground">Worker Errors</div>
+                  <div className="text-lg text-foreground">{diagnosticState.errorCounters.workerError}</div>
+                </div>
+                <div className="p-3 bg-muted rounded">
+                  <div className="font-medium text-foreground">Timeouts</div>
+                  <div className="text-lg text-foreground">{diagnosticState.errorCounters.timeouts}</div>
                 </div>
               </div>
             </Card>
 
-            {/* Copy Diagnostic Data */}
+            {/* Copia Diagnostica */}
             <Card className="p-6">
-              <h3 className="text-lg font-semibold mb-4">Copia diagnostica</h3>
+              <h3 className="text-lg font-semibold mb-4 text-foreground">Copia diagnostica</h3>
               <Button
                 onClick={copyDiagnosticData}
                 variant="outline"
