@@ -26,7 +26,7 @@ export const CalculationRules: React.FC<CalculationRulesProps> = ({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="space-y-2">
-          <Label htmlFor="fee-derev">FeeDeRev (moltiplicatore ≥1,00)</Label>
+          <Label htmlFor="fee-derev">Fee DeRev (moltiplicatore)</Label>
           <div className="relative">
             <Euro className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
@@ -37,13 +37,13 @@ export const CalculationRules: React.FC<CalculationRulesProps> = ({
               value={feeDeRev}
               onChange={(e) => onFeeDeRevChange(Math.max(1.00, parseFloat(e.target.value) || 1.00))}
               className="pl-8"
-              placeholder="1.00"
+              placeholder="1,00"
             />
           </div>
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="fee-marketplace">Fee Marketplace (moltiplicatore ≥1,00)</Label>
+          <Label htmlFor="fee-marketplace">Fee Marketplace (moltiplicatore)</Label>
           <div className="relative">
             <Euro className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
@@ -54,7 +54,7 @@ export const CalculationRules: React.FC<CalculationRulesProps> = ({
               value={feeMarketplace}
               onChange={(e) => onFeeMarketplaceChange(Math.max(1.00, parseFloat(e.target.value) || 1.00))}
               className="pl-8"
-              placeholder="1.00"
+              placeholder="1,00"
             />
           </div>
         </div>
@@ -63,13 +63,13 @@ export const CalculationRules: React.FC<CalculationRulesProps> = ({
       <div className="mt-6 p-4 bg-muted rounded-lg">
         <h4 className="font-medium mb-2">Regole Applicate:</h4>
         <ul className="text-sm text-muted-foreground space-y-1">
-          <li>• SKU: righe con ManufPartNr non vuoto, anche con EAN vuoto</li>
-          <li>• Filtro: ExistingStock {'>'} 1</li>
-          <li>• Prezzo base: CustBestPrice, fallback ListPrice</li>
-          <li>• Spedizione: 6€ fissi</li>
-          <li>• IVA: 22% percentuale fissa</li>
-          <li>• Ordine fee: prima DeRev, poi Marketplace</li>
-          <li>• Prezzo finale: arrotondato all'euro superiore</li>
+          <li>• SKU include righe con ManufPartNr non vuoto anche se EAN vuoto</li>
+          <li>• Filtro ExistingStock {'>'} 1</li>
+          <li>• Prezzo base CustBestPrice con fallback ListPrice</li>
+          <li>• Spedizione 6€ fissi</li>
+          <li>• IVA 22% percentuale fissa</li>
+          <li>• Ordine fee: prima DeRev poi Marketplace</li>
+          <li>• Prezzo finale SKU arrotondato all'euro superiore</li>
         </ul>
       </div>
     </Card>

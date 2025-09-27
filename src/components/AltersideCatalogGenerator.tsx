@@ -449,25 +449,23 @@ const AltersideCatalogGenerator = () => {
           />
         </div>
 
-        {/* Diagnostic Mode Toggle */}
-        <Card className="mb-6 p-4">
-          <div className="flex items-center space-x-2">
-            <Checkbox 
-              id="diagnostic-mode"
-              checked={isDiagnosticMode}
-              onCheckedChange={(checked) => setIsDiagnosticMode(checked === true)}
-            />
-            <label htmlFor="diagnostic-mode" className="text-sm font-medium">
-              Modalità diagnostica
-            </label>
-          </div>
-        </Card>
-
         {/* Actions */}
         <Card className="mb-6 p-6">
           <div className="space-y-4">
             
-            {/* Diagnostic Prescan Button - Only visible with diagnostic mode ON */}
+            {/* Diagnostic Mode Toggle - Positioned immediately above action buttons */}
+            <div className="flex items-center space-x-2 pb-4 border-b">
+              <Checkbox 
+                id="diagnostic-mode"
+                checked={isDiagnosticMode}
+                onCheckedChange={(checked) => setIsDiagnosticMode(checked === true)}
+              />
+              <label htmlFor="diagnostic-mode" className="text-sm font-medium">
+                Modalità diagnostica
+              </label>
+            </div>
+            
+            {/* Diagnostic Prescan Button - Only exists in DOM when diagnostic mode ON */}
             {isDiagnosticMode && (
               <Button
                 onClick={handleDiagnosticPrescan}
@@ -524,17 +522,31 @@ const AltersideCatalogGenerator = () => {
           </div>
         </Card>
 
-        {/* Diagnostic Panels - Only visible with diagnostic mode ON */}
+        {/* Debug/Diagnostica - Only visible when diagnostic mode ON */}
         {isDiagnosticMode && (
           <div className="space-y-6">
-            {/* Worker Messages */}
+            {/* Eventi Debug */}
             <Card className="p-6">
-              <h3 className="text-lg font-semibold mb-4">Messaggi Worker</h3>
+              <h3 className="text-lg font-semibold mb-4">Eventi Debug</h3>
+              <div className="bg-muted p-3 rounded max-h-32 overflow-y-auto">
+                {debugEvents.length === 0 ? (
+                  <div className="text-muted-foreground text-sm">Nessun evento registrato</div>
+                ) : (
+                  debugEvents.map((event, index) => (
+                    <div key={index} className="text-sm font-mono">{event}</div>
+                  ))
+                )}
+              </div>
+            </Card>
+
+            {/* Messaggi Worker (primi 10) */}
+            <Card className="p-6">
+              <h3 className="text-lg font-semibold mb-4">Messaggi Worker (primi 10)</h3>
               <div className="bg-muted p-3 rounded max-h-32 overflow-y-auto">
                 {diagnosticState.workerMessages.length === 0 ? (
                   <div className="text-muted-foreground text-sm">Nessun messaggio ricevuto</div>
                 ) : (
-                  diagnosticState.workerMessages.map((msg: any) => (
+                  diagnosticState.workerMessages.slice(0, 10).map((msg: any) => (
                     <div key={msg.id} className="text-sm font-mono mb-1">
                       [{msg.timestamp}] {JSON.stringify(msg.data)}
                     </div>
@@ -543,7 +555,7 @@ const AltersideCatalogGenerator = () => {
               </div>
             </Card>
 
-            {/* Statistics */}
+            {/* Statistiche Diagnostiche */}
             <Card className="p-6">
               <h3 className="text-lg font-semibold mb-4">Statistiche Diagnostiche</h3>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -562,20 +574,6 @@ const AltersideCatalogGenerator = () => {
                 <div className="p-3 bg-muted rounded">
                   <div className="font-medium">Messaggi</div>
                   <div className="text-lg">{diagnosticState.workerMessages.length}</div>
-                </div>
-              </div>
-
-              {/* Debug Events */}
-              <div className="mt-4">
-                <h4 className="font-medium mb-2">Eventi Debug</h4>
-                <div className="bg-muted p-3 rounded max-h-32 overflow-y-auto">
-                  {debugEvents.length === 0 ? (
-                    <div className="text-muted-foreground text-sm">Nessun evento registrato</div>
-                  ) : (
-                    debugEvents.map((event, index) => (
-                      <div key={index} className="text-sm font-mono">{event}</div>
-                    ))
-                  )}
                 </div>
               </div>
             </Card>
