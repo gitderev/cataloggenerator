@@ -6,7 +6,12 @@ import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from '@/hooks/use-toast';
 import { Upload, Download, FileText, CheckCircle, XCircle, AlertCircle, Clock, Activity, Info, X } from 'lucide-react';
-// Import statements will be added when components are available
+import { FileUpload } from './FileUpload';
+import { MaterialFileUpload } from './MaterialFileUpload';
+import { AdditionalFilesUpload } from './AdditionalFilesUpload';
+import { ColumnMapping } from './ColumnMapping';
+import { MultiColumnMapping } from './MultiColumnMapping';
+import { DataPreview } from './DataPreview';
 
 // Processing states
 type ProcessingState = 'idle' | 'creating' | 'prescanning' | 'running' | 'done' | 'error';
@@ -16,12 +21,22 @@ const AltersideCatalogGenerator = () => {
   const [progressPct, setProgressPct] = useState(0);
   const [lastClickTime, setLastClickTime] = useState(0);
   
+  
   // Main catalog state
-  const [catalogData, setCatalogData] = useState<any>(null);
-  const [materialData, setMaterialData] = useState<any>(null);
-  const [additionalFiles, setAdditionalFiles] = useState<any[]>([]);
-  const [columnMappings, setColumnMappings] = useState<any>({});
-  const [multiColumnMappings, setMultiColumnMappings] = useState<any>({});
+  const [catalogFile, setCatalogFile] = useState<File | null>(null);
+  const [materialFile, setMaterialFile] = useState<File | null>(null);
+  const [additionalFiles, setAdditionalFiles] = useState<(File | null)[]>([null, null, null]);
+  const [catalogData, setCatalogData] = useState<any[]>([]);
+  const [materialData, setMaterialData] = useState<any[]>([]);
+  const [file1Headers, setFile1Headers] = useState<string[]>([]);
+  const [file2Headers, setFile2Headers] = useState<string[]>([]);
+  const [skuColumn1, setSkuColumn1] = useState<string>('');
+  const [skuColumn2, setSkuColumn2] = useState<string>('');
+  const [additionalFilesData, setAdditionalFilesData] = useState<Array<{
+    headers: string[];
+    fileName: string;
+    skuColumn: string;
+  }>>([]);
   const [isDiagnosticMode, setIsDiagnosticMode] = useState(false);
   
   // Worker refs for SKU processing
@@ -361,13 +376,71 @@ const AltersideCatalogGenerator = () => {
           </div>
         </Card>
 
-        {/* File Upload Sections - Placeholder */}
-        <Card className="mb-6 p-6">
-          <h3 className="text-lg font-semibold mb-4">Carica File</h3>
-          <div className="text-muted-foreground">
-            I componenti di upload file saranno ripristinati dai file esistenti del progetto.
+        {/* File Upload Sections */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <FileUpload 
+            onFileSelect={setCatalogFile}
+            selectedFile={catalogFile}
+            title="File Catalogo"
+            accept=".txt,.csv"
+          />
+          <MaterialFileUpload 
+            onFileSelect={setMaterialFile}
+            selectedFile={materialFile}
+          />
+        </div>
+
+        <div className="mb-6">
+          <AdditionalFilesUpload 
+            files={additionalFiles}
+            onFileSelect={(index: number) => (file: File | null) => {
+              setAdditionalFiles(prev => {
+                const newFiles = [...prev];
+                newFiles[index] = file;
+                return newFiles;
+              });
+            }}
+          />
+        </div>
+
+        {file1Headers.length > 0 && file2Headers.length > 0 && (
+          <div className="mb-6">
+            <ColumnMapping 
+              file1Headers={file1Headers}
+              file2Headers={file2Headers}
+              skuColumn1={skuColumn1}
+              skuColumn2={skuColumn2}
+              onSkuColumn1Change={setSkuColumn1}
+              onSkuColumn2Change={setSkuColumn2}
+            />
           </div>
-        </Card>
+        )}
+
+        {additionalFilesData.length > 0 && (
+          <div className="mb-6">
+            <MultiColumnMapping 
+              materialHeaders={file2Headers}
+              additionalFiles={additionalFilesData}
+              onSkuColumnChange={(fileIndex: number, column: string) => {
+                setAdditionalFilesData(prev => {
+                  const newData = [...prev];
+                  newData[fileIndex] = { ...newData[fileIndex], skuColumn: column };
+                  return newData;
+                });
+              }}
+            />
+          </div>
+        )}
+
+        {catalogData.length > 0 && (
+          <div className="mb-6">
+            <DataPreview 
+              data={catalogData}
+              title="Anteprima Dati Catalogo"
+              maxRows={5}
+            />
+          </div>
+        )}
 
         {/* Action Buttons */}
         <Card className="mb-6 p-6">
@@ -390,7 +463,7 @@ const AltersideCatalogGenerator = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <Button
                 onClick={handleEanGeneration}
-                disabled={isProcessing || !catalogData}
+                disabled={isProcessing || !catalogFile}
                 className="h-12"
               >
                 <Download className="mr-2 h-4 w-4" />
@@ -399,7 +472,7 @@ const AltersideCatalogGenerator = () => {
 
               <Button
                 onClick={handleSkuGeneration}
-                disabled={isProcessing || !catalogData}
+                disabled={isProcessing || !catalogFile}
                 className="h-12"
               >
                 <Download className="mr-2 h-4 w-4" />
