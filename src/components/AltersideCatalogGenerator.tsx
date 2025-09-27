@@ -1111,13 +1111,35 @@ const AltersideCatalogGenerator: React.FC = () => {
       
       // Apply MPN-specific formatting based on current pipeline
       if (currentPipeline === 'MPN') {
+        // Validate "Subtotale post-fee" first  
+        const subfee = asNum(record['Subtotale post-fee']);
+        if (subfee <= 0) {
+          // Log error and skip this record
+          console.log({
+            reason: 'mpn_invalid_subtotale_postfee',
+            value: record,
+            matnr: record.Matnr,
+            mpn: record.ManufPartNr
+          });
+          return null; // Will be filtered out
+        }
+        
+        // Calculate "Prezzo Finale" using toEnding99 on "Subtotale post-fee"
+        const finalNum = toEnding99(subfee);
+        const finalText = toComma(finalNum);
+        
         // MPN specific formatting
         formatted.EAN = toExcelText(record.EAN);
         formatted['Costo di Spedizione'] = '6,00';
         formatted.IVA = '22%';
         formatted['Subtotale post-fee'] = toComma(ceil2(record['Subtotale post-fee']));
         formatted['ListPrice con Fee'] = String(ceilInt(record['ListPrice con Fee']));
-        formatted['Prezzo Finale'] = toComma(record['Prezzo Finale']);
+        formatted['Prezzo Finale'] = finalText;
+        
+        // Validate "Prezzo Finale" ends with ",99"
+        if (!finalText.endsWith(',99')) {
+          console.warn('MPN: Prezzo Finale non termina con ,99', record.Matnr || 'unknown');
+        }
         
         // Remove technical columns for MPN export
         Object.keys(formatted).forEach(key => {
@@ -1489,16 +1511,18 @@ const AltersideCatalogGenerator: React.FC = () => {
       }
       
       // Format data for export and remove internal columns
-      const excelData = formatExcelData(mpnRows).map(record => {
-        const cleanRecord = { ...record };
-        // Remove any internal columns like _eanFinalCents
-        Object.keys(cleanRecord).forEach(key => {
-          if (key.startsWith('_')) {
-            delete cleanRecord[key];
-          }
+      const excelData = formatExcelData(mpnRows)
+        .filter(record => record !== null) // Remove null records from validation failures
+        .map(record => {
+          const cleanRecord = { ...record };
+          // Remove any internal columns like _eanFinalCents
+          Object.keys(cleanRecord).forEach(key => {
+            if (key.startsWith('_')) {
+              delete cleanRecord[key];
+            }
+          });
+          return cleanRecord;
         });
-        return cleanRecord;
-      });
       
       // Validate ending 99 cents
       excelData.forEach((record, index) => {
