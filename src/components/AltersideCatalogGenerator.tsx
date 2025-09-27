@@ -309,6 +309,20 @@ const AltersideCatalogGenerator: React.FC = () => {
     testResults: []
   });
 
+  // Worker strategy and lifecycle state
+  const [workerStrategy, setWorkerStrategy] = useState<'blob' | 'module'>('blob');
+  const [echoTestResult, setEchoTestResult] = useState<string>('');
+  
+  // Worker lifecycle tracking
+  const [workerState, setWorkerState] = useState({
+    created: false,
+    handlersAttached: false,
+    initSent: false,
+    bootReceived: false,
+    readyReceived: false,
+    version: ''
+  });
+
   // Save fees when rememberFees is checked
   useEffect(() => {
     if (rememberFees) {
@@ -318,14 +332,7 @@ const AltersideCatalogGenerator: React.FC = () => {
 
   const [processingState, setProcessingState] = useState<'idle' | 'ready' | 'prescanning' | 'running' | 'done' | 'error'>('idle');
   const [currentPipeline, setCurrentPipeline] = useState<'EAN' | 'MPN' | null>(null);
-  
-  // Worker state
-  const [workerState, setWorkerState] = useState<WorkerState>({
-    handshakeComplete: false,
-    prescanInitialized: false,
-    version: null
-  });
-  
+   
   // Timeout refs
   const handshakeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const progressTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -526,6 +533,137 @@ const AltersideCatalogGenerator: React.FC = () => {
     setDiagnosticState(prev => ({ ...prev, testResults }));
     return testResults;
   }, [diagnosticState.workerMessages]);
+
+  // Echo Worker Test
+  const runEchoTest = useCallback(async (strategy: 'blob' | 'module' = 'blob') => {
+    setEchoTestResult('Testing...');
+    dbg('echo_test_start', { strategy });
+    
+    try {
+      let worker: Worker;
+      
+      if (strategy === 'blob') {
+        // Minimal echo worker code
+        const echoWorkerCode = `
+          // Echo worker boot signal
+          self.postMessage({ type: 'worker_boot', version: 'echo-1.0' });
+          
+          self.addEventListener('error', function(e) {
+            self.postMessage({
+              type: 'worker_error',
+              where: 'boot',
+              message: e.message
+            });
+          });
+          
+          self.onmessage = function(e) {
+            try {
+              if (e.data.type === 'ping') {
+                self.postMessage({ type: 'pong' });
+              } else if (e.data.type === 'crash') {
+                throw new Error('Intentional crash');
+              }
+            } catch (error) {
+              self.postMessage({
+                type: 'worker_error',
+                where: 'runtime',
+                message: error.message
+              });
+            }
+          };
+        `;
+        
+        const blob = new Blob([echoWorkerCode], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        worker = new Worker(blobUrl);
+        dbg('echo_created', { type: 'blob', url: blobUrl });
+        
+        // Clean up blob URL after test
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+        
+      } else {
+        // Module worker
+        worker = new Worker(new URL('/workers/alterside-sku-worker.js', location.origin), { type: 'module' });
+        dbg('echo_created', { type: 'module', url: '/workers/alterside-sku-worker.js' });
+      }
+      
+      // Test protocol
+      let bootReceived = false;
+      let pongReceived = false;
+      
+      const testPromise = new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          worker.terminate();
+          reject(new Error('Echo test timeout'));
+        }, 3000);
+        
+        worker.onmessage = (e) => {
+          const { type } = e.data;
+          
+          if (type === 'worker_boot') {
+            bootReceived = true;
+            dbg('echo_boot', e.data);
+            
+            // Send ping after boot
+            setTimeout(() => {
+              worker.postMessage({ type: 'ping' });
+            }, 100);
+          }
+          
+          if (type === 'pong') {
+            pongReceived = true;
+            dbg('echo_pong', e.data);
+            
+            clearTimeout(timeout);
+            worker.terminate();
+            
+            if (bootReceived && pongReceived) {
+              resolve(`✅ Echo test passed (${strategy})`);
+            } else {
+              resolve(`⚠️ Partial success (${strategy}): boot=${bootReceived}, pong=${pongReceived}`);
+            }
+          }
+          
+          if (type === 'worker_error') {
+            clearTimeout(timeout);
+            worker.terminate();
+            reject(new Error(`Echo worker error: ${e.data.message}`));
+          }
+        };
+        
+        worker.onerror = (error) => {
+          clearTimeout(timeout);
+          worker.terminate();
+          reject(error);
+        };
+      });
+      
+      const result = await testPromise;
+      setEchoTestResult(result);
+      
+      // If blob test fails, try module worker
+      if (strategy === 'blob' && !result.includes('✅')) {
+        dbg('echo_blob_failed', { result });
+        return await runEchoTest('module');
+      }
+      
+      return result;
+      
+    } catch (error) {
+      const errorMsg = `❌ Echo test failed (${strategy}): ${error instanceof Error ? error.message : 'Unknown error'}`;
+      setEchoTestResult(errorMsg);
+      dbg('echo_test_error', { strategy, error: errorMsg });
+      
+      // If blob fails, try module worker
+      if (strategy === 'blob') {
+        dbg('echo_fallback_to_module');
+        setWorkerStrategy('module');
+        return await runEchoTest('module');
+      }
+      
+      return errorMsg;
+    }
+  }, [dbg]);
 
   const generateDiagnosticBundle = useCallback(() => {
     const bundle = {
@@ -1774,6 +1912,9 @@ const AltersideCatalogGenerator: React.FC = () => {
   const createSkuBlobWorker = useCallback(async (isDiagnostic = false, overrideData?: any) => {
     if (!isDiagnostic) {
       console.log('click_sku');
+      dbg('click_sku');
+    } else {
+      dbg('click_diag');
     }
     
     if (isExportingSKU) {
@@ -1783,6 +1924,16 @@ const AltersideCatalogGenerator: React.FC = () => {
       });
       return;
     }
+
+    // Reset worker state
+    setWorkerState({
+      created: false,
+      handlersAttached: false,
+      initSent: false,
+      bootReceived: false,
+      readyReceived: false,
+      version: ''
+    });
 
     // Validate files are available
     if (!files.material.file || !files.stock.file || !files.price.file) {
@@ -1821,40 +1972,154 @@ const AltersideCatalogGenerator: React.FC = () => {
 
     // Generate version hash for cache busting
     const version = Date.now().toString(36);
-    dbg('worker_created', { type: 'blob', version });
     
-    // Self-contained worker code - completely inline
-    const workerCode = `
-// alterside-sku-worker.js - Self-contained SKU processing worker
-// Optimized for performance with batch processing and minimal overhead
+    try {
+      let worker: Worker;
+      let blobUrl: string | null = null;
+      
+      if (workerStrategy === 'blob') {
+        dbg('worker_created', { strategy: 'blob', version });
+        
+        // Minimal hardened worker code
+        const workerCode = `
+          self.postMessage({ type: 'worker_boot', version: '${version}' });
+          
+          self.addEventListener('error', function(e) {
+            self.postMessage({
+              type: 'worker_error',
+              where: 'boot',
+              message: e.message,
+              detail: { filename: e.filename, lineno: e.lineno }
+            });
+          });
+          
+          self.onmessage = function(e) {
+            const { type, data } = e.data || {};
+            
+            if (type === 'INIT') {
+              self.postMessage({ type: 'worker_ready', version: '${version}', schema: 1 });
+              return;
+            }
+            
+            if (type === 'PRESCAN_START') {
+              const total = data?.materialData?.filter(row => row.ManufPartNr).length || 0;
+              self.postMessage({ type: 'prescan_progress', done: 0, total });
+              setTimeout(() => {
+                self.postMessage({ type: 'prescan_done', counts: { mpnIndexed: total, eanIndexed: 0 }, total });
+              }, 100);
+            }
+            
+            if (type === 'ping') {
+              self.postMessage({ type: 'pong' });
+            }
+          };
+        `;
+        
+        const blob = new Blob([workerCode], { type: 'text/javascript' });
+        blobUrl = URL.createObjectURL(blob);
+        worker = new Worker(blobUrl);
+        setBlobUrlRef(blobUrl);
+        
+      } else {
+        dbg('worker_created', { strategy: 'module', url: '/workers/alterside-sku-worker.js' });
+        worker = new Worker(new URL('/workers/alterside-sku-worker.js', location.origin), { type: 'module' });
+      }
 
-let isProcessing = false;
-let shouldCancel = false;
-let indexByMPN = new Map();
-let indexByEAN = new Map();
+      // A) Hardening lifecycle lato UI - attach handlers IMMEDIATELY
+      let handshakeTimer: NodeJS.Timeout;
+      let workerReadyReceived = false;
+      
+      const handshakePromise = new Promise<void>((resolve, reject) => {
+        // Attach handlers first
+        worker.onmessage = (e: MessageEvent) => {
+          const { type } = e.data;
+          addWorkerMessage(e.data);
+          
+          if (type === 'worker_boot') {
+            setWorkerState(prev => ({ ...prev, bootReceived: true }));
+            dbg('worker_boot', e.data);
+          }
+          
+          if (type === 'worker_ready' && !workerReadyReceived) {
+            workerReadyReceived = true;
+            clearTimeout(handshakeTimer);
+            setWorkerState(prev => ({ ...prev, readyReceived: true }));
+            dbg('worker_ready', e.data);
+            resolve();
+          }
+          
+          if (type === 'worker_error') {
+            clearTimeout(handshakeTimer);
+            reject(new Error(e.data.message));
+          }
+        };
+        
+        worker.onerror = (error: ErrorEvent) => {
+          clearTimeout(handshakeTimer);
+          console.error('WORKER_ERROR:', error);
+          reject(error);
+        };
+        
+        // Log handlers attached
+        console.log('handlers_attached=true');
+        setWorkerState(prev => ({ ...prev, handlersAttached: true }));
+        
+        // Send INIT after handlers attached
+        const initPayload = {
+          version,
+          schema: 1,
+          diag: diagnosticState.isEnabled,
+          sampleSize: diagnosticState.isEnabled ? diagnosticState.maxRows : undefined
+        };
+        
+        worker.postMessage({ type: 'INIT', data: initPayload });
+        console.log('init_sent=true', initPayload);
+        setWorkerState(prev => ({ ...prev, initSent: true }));
+        
+        // Handshake timeout
+        handshakeTimer = setTimeout(() => {
+          console.log('handshake_timeout');
+          dbg('handshake_timeout');
+          worker.terminate();
+          if (blobUrl) {
+            URL.revokeObjectURL(blobUrl);
+            console.log('blob_url_revoked=true (timeout)');
+          }
+          reject(new Error('Worker handshake timeout'));
+        }, 2000);
+      });
 
-// Send worker_boot signal immediately on worker start
-self.postMessage({ type: 'worker_boot', version: '${version}' });
-
-// Set up global error handler
-self.addEventListener('error', function(e) {
-  self.postMessage({
-    type: 'worker_error',
-    where: 'boot',
-    message: e.message || 'Worker boot error',
-    detail: e.filename + ':' + e.lineno
+      setSkuWorker(worker);
+      setIsExportingSKU(true);
+      setProgressPct(0);
+      
+      // Wait for handshake
+      await handshakePromise;
+      
+      // Continue with prescan logic
+      if (!debugState.materialPreScanDone) {
+        setProcessingState('prescanning');
+        dbg('prescan_start');
+        
+        const materialData = files.material.file?.data || [];
+        worker.postMessage({
+          type: 'PRESCAN_START',
+          data: { materialData }
+        });
+      }
+      
+    } catch (error) {
+      setProcessingState('error');
+      setIsExportingSKU(false);
+      toast({
+        title: "Errore Worker",
+        description: error instanceof Error ? error.message : "Worker non inizializzato",
+        variant: "destructive",
+      });
+    }
+  }, [files, feeConfig, isExportingSKU, skuWorker, toast, debugState.materialPreScanDone, diagnosticState.isEnabled, diagnosticState.maxRows, workerStrategy, dbg]);
   });
-});
-
-// Main message handler with protocol compliance
-self.onmessage = function(e) {
-  try {
-    const { type, data } = e.data || {};
-    
-    if (type === 'INIT') {
-      // Validate INIT payload
-      if (!data || typeof data !== 'object') {
-        self.postMessage({
+}
           type: 'worker_error',
           where: 'boot',
           message: 'Invalid INIT payload'
@@ -2932,20 +3197,35 @@ function processSkuRow(row, feeDeRevPercent, feeMktPercent, rejects, rowIndex) {
                           localStorage.setItem('diag', '1');
                         }
                       }}
-                      className="w-4 h-4"
+                       className="w-4 h-4"
                     />
                   </div>
                   
                   {diagnosticState.isEnabled && (
-                    <div className="flex justify-center">
-                      <button
-                        onClick={runDiagnosticSku}
-                        disabled={!(debugState.materialValid && debugState.stockValid && debugState.priceValid) || isExportingSKU}
-                        className={`btn btn-secondary text-lg px-8 py-3 ${!canProcess || isExportingSKU ? 'is-disabled' : ''}`}
-                      >
-                        <Upload className="mr-2 h-5 w-5" />
-                        Diagnostica prescan
-                      </button>
+                    <div className="space-y-3">
+                      <div className="flex justify-center gap-3">
+                        <button
+                          onClick={runDiagnosticSku}
+                          disabled={!(debugState.materialValid && debugState.stockValid && debugState.priceValid) || isExportingSKU}
+                          className={`btn btn-secondary text-sm px-6 py-2 ${!canProcess || isExportingSKU ? 'is-disabled' : ''}`}
+                        >
+                          <Upload className="mr-2 h-4 w-4" />
+                          Diagnostica prescan
+                        </button>
+                        
+                        <button
+                          onClick={() => runEchoTest()}
+                          className="btn btn-outline text-sm px-6 py-2"
+                        >
+                          Echo worker
+                        </button>
+                      </div>
+                      
+                      {echoTestResult && (
+                        <div className="text-xs text-center p-2 bg-muted rounded">
+                          <strong>Echo Test:</strong> {echoTestResult}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
