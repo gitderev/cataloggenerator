@@ -1052,23 +1052,31 @@ const AltersideCatalogGenerator: React.FC = () => {
 
   const formatExcelData = (data: ProcessedRecord[]) => {
     // Helper function for safe number conversion
-    const asNumber = (v: number | string | undefined | null) => {
-      const n = typeof v === 'string' ? parseFloat(v.replace('.', '').replace(',', '.')) : Number(v);
-      return Number.isFinite(n) ? n : 0;
+    const asNumber = (v) => { 
+      const n = typeof v === 'string' ? parseFloat(v.replace('.', '').replace(',', '.')) : Number(v); 
+      return Number.isFinite(n) ? n : 0; 
     };
 
     return data.map(record => ({
-      ...record,
-      ExistingStock: record.ExistingStock.toString(),
+      Matnr: String(record.Matnr ?? ''),
+      ManufPartNr: String(record.ManufPartNr ?? ''),
+      EAN: String(record.EAN ?? ''),
+      ShortDescription: String(record.ShortDescription ?? ''),
+      ExistingStock: String(record.ExistingStock ?? ''),
       ListPrice: asNumber(record.ListPrice).toFixed(2).replace('.', ','),
-      CustBestPrice: record.CustBestPrice.toString(),
-      'Costo di spedizione': record['Costo di spedizione'].toString(),
+      CustBestPrice: String(record.CustBestPrice ?? ''),
+      'Costo di Spedizione': String(record['Costo di Spedizione'] ?? '6,00'),
+      IVA: String(record.IVA ?? '22%'),
       'Prezzo con spediz e IVA': asNumber(record['Prezzo con spediz e IVA']).toFixed(2).replace('.', ','),
-      FeeDeRev: record.FeeDeRev.toString(),
-      'Fee Marketplace': record['Fee Marketplace'].toString(),
+      FeeDeRev: String(record.FeeDeRev ?? ''),
+      'Fee Marketplace': String(record['Fee Marketplace'] ?? ''),
       'Subtotale post-fee': asNumber(record['Subtotale post-fee']).toFixed(2).replace('.', ','),
-      'Prezzo Finale': typeof record['Prezzo Finale'] === 'string' ? record['Prezzo Finale'] : asNumber(record['Prezzo Finale']).toFixed(2).replace('.', ','),
-      'ListPrice con Fee': typeof record['ListPrice con Fee'] === 'string' ? record['ListPrice con Fee'] : String(Math.ceil(asNumber(record['ListPrice con Fee'])))
+      'Prezzo Finale': (typeof record['Prezzo Finale'] === 'string')
+        ? record['Prezzo Finale']
+        : asNumber(record['Prezzo Finale']).toFixed(2).replace('.', ','),
+      'ListPrice con Fee': (typeof record['ListPrice con Fee'] === 'string')
+        ? record['ListPrice con Fee']
+        : String(Math.ceil(asNumber(record['ListPrice con Fee'])))
     }));
   };
 
@@ -1371,12 +1379,36 @@ const AltersideCatalogGenerator: React.FC = () => {
         return;
       }
       
+      // Format data for export and remove internal columns
+      const excelData = formatExcelData(mpnRows).map(record => {
+        const cleanRecord = { ...record };
+        // Remove any internal columns like _eanFinalCents
+        Object.keys(cleanRecord).forEach(key => {
+          if (key.startsWith('_')) {
+            delete cleanRecord[key];
+          }
+        });
+        return cleanRecord;
+      });
+      
+      // Validate ending 99 cents
+      let invalidCount = 0;
+      excelData.forEach(record => {
+        const prezzoFinale = String(record['Prezzo Finale'] ?? '');
+        if (!prezzoFinale.endsWith(',99')) {
+          invalidCount++;
+        }
+      });
+      
+      if (invalidCount > 0) {
+        console.warn(`mpn:ending99:ko:${invalidCount}`);
+      }
+      
       dbg('excel:write:start');
       
       const { timestamp, sheetName } = getTimestamp();
       const filename = `Catalogo_MPN.xlsx`;
 
-      const excelData = formatExcelData(mpnRows);
       const ws = XLSX.utils.json_to_sheet(excelData);
       
       // Force EAN column to text format for both pipelines
