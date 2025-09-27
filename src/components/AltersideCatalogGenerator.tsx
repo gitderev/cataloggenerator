@@ -540,15 +540,18 @@ const AltersideCatalogGenerator = () => {
                     
                     return (
                       <>
-                        <div className={bg === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
-                          --background: "{bg}" {bg === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
-                        </div>
-                        <div className={card === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
-                          --card: "{card}" {card === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
-                        </div>
-                        <div className={muted === '210 40% 96%' ? 'text-green-600' : 'text-red-600'}>
-                          --muted: "{muted}" {muted === '210 40% 96%' ? '✓' : '✗ Expected: "210 40% 96%"'}
-                        </div>
+                         <div className={bg === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
+                           --background: "{bg}" {bg === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
+                         </div>
+                         <div className={card === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
+                           --card: "{card}" {card === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
+                         </div>
+                         <div className={muted === '210 40% 96%' ? 'text-green-600' : 'text-red-600'}>
+                           --muted: "{muted}" {muted === '210 40% 96%' ? '✓' : '✗ Expected: "210 40% 96%"'}
+                         </div>
+                         <div className="mt-2 text-muted-foreground">
+                           body.backgroundColor: {getComputedStyle(document.body).backgroundColor}
+                         </div>
                       </>
                     );
                   })()}
