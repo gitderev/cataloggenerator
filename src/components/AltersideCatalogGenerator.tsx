@@ -257,9 +257,10 @@ interface DiagnosticState {
   testResults: Array<{ test: string; status: 'pass' | 'fail'; error?: string }>;
 }
 
-// Valid worker message schemas
+// Valid worker message schemas with strict validation
 const WORKER_MESSAGE_SCHEMAS = {
-  worker_ready: ['type', 'version'],
+  worker_boot: ['type', 'version'],
+  worker_ready: ['type', 'version', 'schema'],
   prescan_progress: ['type', 'done', 'total'],
   prescan_done: ['type', 'counts', 'total'],
   sku_progress: ['type', 'done', 'total'],
@@ -267,6 +268,13 @@ const WORKER_MESSAGE_SCHEMAS = {
   worker_error: ['type', 'message', 'where'],
   pong: ['type']
 } as const;
+
+// Worker communication state
+interface WorkerState {
+  handshakeComplete: boolean;
+  prescanInitialized: boolean;
+  version: string | null;
+}
 
 const AltersideCatalogGenerator: React.FC = () => {
   const [files, setFiles] = useState<FileUploadState>({
@@ -310,6 +318,18 @@ const AltersideCatalogGenerator: React.FC = () => {
 
   const [processingState, setProcessingState] = useState<'idle' | 'ready' | 'prescanning' | 'running' | 'done' | 'error'>('idle');
   const [currentPipeline, setCurrentPipeline] = useState<'EAN' | 'MPN' | null>(null);
+  
+  // Worker state
+  const [workerState, setWorkerState] = useState<WorkerState>({
+    handshakeComplete: false,
+    prescanInitialized: false,
+    version: null
+  });
+  
+  // Timeout refs
+  const handshakeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const progressTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const workerRef = useRef<Worker | null>(null);
   
   // Progress states (based on rows READ, not valid rows)
   const [total, setTotal] = useState(0); // prescan estimate
@@ -370,8 +390,6 @@ const AltersideCatalogGenerator: React.FC = () => {
   // Export state for preventing double clicks
   const [isExportingEAN, setIsExportingEAN] = useState(false);
   const [isExportingSKU, setIsExportingSKU] = useState(false);
-
-  const workerRef = useRef<Worker | null>(null);
   
   // Global debug function - defined first
   const dbg = useCallback((event: string, data?: any) => {
@@ -380,18 +398,23 @@ const AltersideCatalogGenerator: React.FC = () => {
     setDebugEvents(prev => [...prev, message]);
   }, []);
 
-  // Diagnostic functions
+  // Robust message validation - never crash
   const validateWorkerMessage = useCallback((data: any) => {
-    if (!data || typeof data !== 'object' || !('type' in data)) {
+    // First check: is it an object with type?
+    if (!data || typeof data !== 'object' || !('type' in data) || typeof data.type !== 'string') {
       setDiagnosticState(prev => ({
         ...prev,
         errorCounters: { ...prev.errorCounters, msgInvalid: prev.errorCounters.msgInvalid + 1 }
       }));
-      dbg('worker_msg_invalid', { receivedKeys: Object.keys(data || {}), expectedKeys: ['type'] });
+      dbg('worker_msg_invalid', { 
+        reason: 'invalid_structure',
+        receivedKeys: data ? Object.keys(data) : [],
+        expectedKeys: ['type'] 
+      });
       return false;
     }
 
-    const type = data.type as string;
+    const type = data.type;
     const expectedKeys = WORKER_MESSAGE_SCHEMAS[type as keyof typeof WORKER_MESSAGE_SCHEMAS];
     
     if (!expectedKeys) {
@@ -399,7 +422,12 @@ const AltersideCatalogGenerator: React.FC = () => {
         ...prev,
         errorCounters: { ...prev.errorCounters, msgInvalid: prev.errorCounters.msgInvalid + 1 }
       }));
-      dbg('worker_msg_invalid', { type, receivedKeys: Object.keys(data), expectedKeys: 'unknown_type' });
+      dbg('worker_msg_invalid', { 
+        reason: 'unknown_type',
+        type, 
+        receivedKeys: Object.keys(data), 
+        expectedKeys: 'unknown_type' 
+      });
       return false;
     }
 
@@ -409,7 +437,13 @@ const AltersideCatalogGenerator: React.FC = () => {
         ...prev,
         errorCounters: { ...prev.errorCounters, msgInvalid: prev.errorCounters.msgInvalid + 1 }
       }));
-      dbg('worker_msg_invalid', { type, receivedKeys: Object.keys(data), expectedKeys, missingKeys });
+      dbg('worker_msg_invalid', { 
+        reason: 'missing_keys',
+        type, 
+        receivedKeys: Object.keys(data), 
+        expectedKeys, 
+        missingKeys 
+      });
       return false;
     }
 
@@ -426,6 +460,18 @@ const AltersideCatalogGenerator: React.FC = () => {
       lastHeartbeat: Date.now()
     }));
   }, []);
+
+  // Clear timeouts helper
+  const clearWorkerTimeouts = useCallback(() => {
+    if (handshakeTimeoutRef.current) {
+      clearTimeout(handshakeTimeoutRef.current);
+      handshakeTimeoutRef.current = null;
+    }
+    if (progressTimeoutRef.current) {
+      clearTimeout(progressTimeoutRef.current);
+      progressTimeoutRef.current = null;
+    }
+  }, [handshakeTimeoutRef, progressTimeoutRef]);
 
   const runDiagnosticTests = useCallback(async () => {
     const testResults: Array<{ test: string; status: 'pass' | 'fail'; error?: string }> = [];
@@ -1778,20 +1824,45 @@ let shouldCancel = false;
 let indexByMPN = new Map();
 let indexByEAN = new Map();
 
-// Send ready signal immediately on worker start
-self.postMessage({ type: 'worker_ready', version: '${version}' });
+// Send worker_boot signal immediately on worker start
+self.postMessage({ type: 'worker_boot', version: '${version}' });
 
-// Wrap all message handling in try/catch for error safety
+// Set up global error handler
+self.addEventListener('error', function(e) {
+  self.postMessage({
+    type: 'worker_error',
+    where: 'boot',
+    message: e.message || 'Worker boot error',
+    detail: e.filename + ':' + e.lineno
+  });
+});
+
+// Main message handler with protocol compliance
 self.onmessage = function(e) {
   try {
-    const { type, data } = e.data;
+    const { type, data } = e.data || {};
     
-    if (type === 'cancel') {
-      shouldCancel = true;
+    if (type === 'INIT') {
+      // Validate INIT payload
+      if (!data || typeof data !== 'object') {
+        self.postMessage({
+          type: 'worker_error',
+          where: 'boot',
+          message: 'Invalid INIT payload'
+        });
+        return;
+      }
+      
+      // Send worker_ready with schema
+      self.postMessage({ 
+        type: 'worker_ready', 
+        version: '${version}', 
+        schema: 1 
+      });
       return;
     }
     
-    if (type === 'prescan') {
+    if (type === 'PRESCAN_START') {
       try {
         shouldCancel = false;
         isProcessing = true;
@@ -1800,14 +1871,16 @@ self.onmessage = function(e) {
         self.postMessage({
           type: 'worker_error',
           message: error instanceof Error ? error.message : 'Errore durante pre-scan',
-          stack: error instanceof Error ? error.stack : null
+          where: 'prescan',
+          detail: error instanceof Error ? error.stack : null
         });
       } finally {
         isProcessing = false;
       }
+      return;
     }
     
-    if (type === 'process') {
+    if (type === 'SKU_START') {
       try {
         shouldCancel = false;
         isProcessing = true;
@@ -1816,18 +1889,27 @@ self.onmessage = function(e) {
         self.postMessage({
           type: 'worker_error',
           message: error instanceof Error ? error.message : 'Errore sconosciuto durante elaborazione SKU',
-          stack: error instanceof Error ? error.stack : null
+          where: 'sku',
+          detail: error instanceof Error ? error.stack : null
         });
       } finally {
         isProcessing = false;
       }
+      return;
     }
+    
+    if (type === 'ping') {
+      self.postMessage({ type: 'pong' });
+      return;
+    }
+    
   } catch (globalError) {
     // Catch any top-level errors in message handling
     self.postMessage({
       type: 'worker_error',
       message: globalError instanceof Error ? globalError.message : 'Errore critico nel worker',
-      stack: globalError instanceof Error ? globalError.stack : null
+      where: 'boot',
+      detail: globalError instanceof Error ? globalError.stack : null
     });
   }
 };
