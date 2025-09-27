@@ -114,38 +114,8 @@ function saveFees(cfg: FeeConfig) {
   localStorage.setItem('catalog_fees_v2', JSON.stringify(cfg));
 }
 
-// Helper functions for MPN calculations
-function asNum(v: any): number {
-  if (v == null || v === '') return 0;
-  if (typeof v === 'number') return v;
-  const s = String(v).replace(/\./g, '').replace(',', '.');
-  const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function ceil2(v: any): number {
-  return Math.ceil(asNum(v) * 100) / 100;
-}
-
-function ceilInt(v: any): number {
-  return Math.ceil(asNum(v));
-}
-
-function toEnding99(v: any): number {
-  const n = asNum(v);
-  const c = Math.round(n * 100) % 100;
-  if (c === 99) return Math.floor(n) + 0.99;
-  const f = Math.floor(n);
-  return n <= f + 0.99 ? f + 0.99 : f + 1.99;
-}
-
-function toComma(n: any): string {
-  return asNum(n).toFixed(2).replace('.', ',');
-}
-
-function toExcelText(s: any): string {
-  const str = String(s ?? '');
-  return /^[=+\-@]/.test(str) ? `'${str}` : str;
+function ceilInt(x: number): number { 
+  return Math.ceil(x); 
 }
 
 
@@ -194,17 +164,8 @@ function computeFinalPrice({
   );
   const prezzoFinaleEAN = eanResult.finalCents / 100;
   
-// MPN final price: apply toEnding99 to subtotale post-fee
-  const subtotalePostFee = ceil2(postFee);
-  const prezzoFinaleMPN = toEnding99(subtotalePostFee);
-  
-  // MPN listPrice calculation - independent pipeline
-  let listPriceConFeeMPN: number | string = '';
-  if (hasListPrice) {
-    const listPriceNum = asNum(ListPrice);
-    const mpnListTotal = listPriceNum + shipping + (listPriceNum + shipping) * 0.22 + (listPriceNum + shipping) * 0.22 * (feeDrev - 1) + (listPriceNum + shipping) * 0.22 * feeDrev * (feeMkt - 1);
-    listPriceConFeeMPN = ceilInt(mpnListTotal);
-  }
+  // MPN final price: use old logic (ceil to integer)
+  const prezzoFinaleMPN = Math.ceil(postFee);
   
   // Log samples for EAN route debugging (separate counters for cbp vs listprice)
   if (baseRoute === 'cbp') {
@@ -268,7 +229,7 @@ function computeFinalPrice({
     }
   }
 
-  return { base, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee: listPriceConFeeMPN || listPriceConFee, eanResult };
+  return { base, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee, eanResult };
 }
 
 const AltersideCatalogGenerator: React.FC = () => {
@@ -978,39 +939,12 @@ const AltersideCatalogGenerator: React.FC = () => {
           }
 
           // Use new fee calculation system
-          // Enhanced validation for MPN
-          if (currentPipeline === 'MPN') {
-            // Check for null, empty or negative values in essential components
-            const shipping = 6.00;
-            const iva = (listPriceNum + shipping) * 0.22;
-            if (listPriceNum <= 0 || custBestNumRaw <= 0 || feeConfig.feeDrev <= 0 || feeConfig.feeMkt <= 0 || shipping <= 0) {
-              const le: LogEntry = { 
-                source_file: 'MaterialFile.txt', 
-                line: processedLocal + 2, 
-                Matnr: matnr, 
-                ManufPartNr: row.ManufPartNr || '', 
-                EAN: row.EAN || '', 
-                reason: 'negative_or_null_component', 
-                details: `ListPrice=${listPriceNum}, CustBest=${custBestNumRaw}, feeDrev=${feeConfig.feeDrev}, feeMkt=${feeConfig.feeMkt}` 
-              };
-              logsMPN.push(le);
-              return;
-            }
-          }
-
           const calc = computeFinalPrice({
             CustBestPrice: custBestNumRaw,
             ListPrice: listPriceNum,
             feeDrev: feeConfig.feeDrev,
             feeMkt: feeConfig.feeMkt
           });
-
-          // MPN-specific calculations using corrected helpers
-          const subtotalePostFee = currentPipeline === 'MPN' ? ceil2(calc.postFee) : calc.postFee;
-          const listPriceConFee = currentPipeline === 'MPN' && listPriceNum > 0 
-            ? ceilInt(listPriceNum + 6.00 + (listPriceNum + 6.00) * 0.22 + feeConfig.feeDrev + feeConfig.feeMkt)
-            : calc.listPriceConFee;
-          const prezzoFinaleMPN = currentPipeline === 'MPN' ? toEnding99(subtotalePostFee) : undefined;
 
           const base: ProcessedRecord = {
             Matnr: matnr,
@@ -1025,28 +959,27 @@ const AltersideCatalogGenerator: React.FC = () => {
             'Prezzo con spediz e IVA': calc.subtotConIva,
             FeeDeRev: feeConfig.feeDrev,
             'Fee Marketplace': feeConfig.feeMkt,
-            'Subtotale post-fee': currentPipeline === 'MPN' ? subtotalePostFee : calc.postFee,
-            'Prezzo Finale': currentPipeline === 'EAN' ? calc.eanResult.finalDisplay : prezzoFinaleMPN,
-            'ListPrice con Fee': currentPipeline === 'MPN' ? listPriceConFee : calc.listPriceConFee
+            'Subtotale post-fee': calc.postFee,
+            'Prezzo Finale': currentPipeline === 'EAN'
+              ? calc.eanResult.finalDisplay
+              : (function(){ const cents = Math.round(calc.postFee*100); const up99 = (Math.floor(cents/100)+1)*100 - 1; return (up99/100).toFixed(2).replace('.', ','); })(),
+            'ListPrice con Fee': calc.listPriceConFee
           };
 
-
-          // Only add to MPN if pipeline is MPN and ManufPartNr is not empty
-          if (currentPipeline === 'MPN' && base.ManufPartNr) {
-            processedMPN.push(base);
-          } else if (currentPipeline === 'MPN') {
-            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: '', EAN: base.EAN, reason: 'manufpartnr_empty', details: 'ManufPartNr vuoto o mancante' };
-            logsMPN.push(le);
-          }
-          
-          // For EAN pipeline, add only if EAN is valid  
-          if (currentPipeline === 'EAN' && base.EAN) {
+          if (base.EAN) {
             // Add internal EAN metadata for validation
-            (base as any)._eanFinalCents = calc.eanResult.finalCents;
+            (base as any)._eanFinalCents = currentPipeline === 'EAN' ? calc.eanResult.finalCents : undefined;
             processedEAN.push(base);
-          } else if (currentPipeline === 'EAN') {
+          } else {
             const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: base.ManufPartNr, EAN: '', reason: 'ean_empty', details: 'EAN vuoto o mancante' };
             logsEAN.push(le);
+          }
+
+          if (base.ManufPartNr) {
+            processedMPN.push(base);
+          } else {
+            const le: LogEntry = { source_file: 'MaterialFile.txt', line: processedLocal + 2, Matnr: matnr, ManufPartNr: '', EAN: base.EAN, reason: 'manufpartnr_empty', details: 'ManufPartNr vuoto o mancante' };
+            logsMPN.push(le);
           }
 
           // Progress tracking is already done above - don't double count
@@ -1120,34 +1053,35 @@ const AltersideCatalogGenerator: React.FC = () => {
   };
 
   const formatExcelData = (data: ProcessedRecord[]) => {
-    return data.map(record => {
-      // Remove any internal columns starting with "_" or ending with technical suffixes
-      const cleanRecord = { ...record };
-      Object.keys(cleanRecord).forEach(key => {
-        if (key.startsWith('_') || key.endsWith('_cents') || key.endsWith('_Cents') || key.endsWith('_Debug') || key === '_eanFinalCents') {
-          delete cleanRecord[key];
-        }
-      });
+    // Helper functions for safe number conversion
+    const asNumber = (v) => { 
+      const n = typeof v === 'string' ? parseFloat(v.replace('.', '').replace(',', '.')) : Number(v); 
+      return Number.isFinite(n) ? n : 0; 
+    };
+    const ceil2 = (v) => Math.ceil(asNumber(v) * 100) / 100;
 
-      return {
-        ...cleanRecord,
-        Matnr: String(record.Matnr ?? ''),
-        ManufPartNr: String(record.ManufPartNr ?? ''),
-        EAN: toExcelText(record.EAN),
-        ShortDescription: String(record.ShortDescription ?? ''),
-        ExistingStock: String(record.ExistingStock ?? ''),
-        ListPrice: toComma(record.ListPrice),
-        CustBestPrice: String(record.CustBestPrice ?? ''),
-        'Costo di Spedizione': '6,00',
-        IVA: '22%',
-        'Prezzo con spediz e IVA': toComma(record['Prezzo con spediz e IVA']),
-        FeeDeRev: String(record.FeeDeRev ?? ''),
-        'Fee Marketplace': String(record['Fee Marketplace'] ?? ''),
-        'Subtotale post-fee': toComma(ceil2(record['Subtotale post-fee'])),
-        'Prezzo Finale': toComma(record['Prezzo Finale']),
-        'ListPrice con Fee': String(ceilInt(record['ListPrice con Fee']))
-      };
-    });
+    return data.map(record => ({
+      ...record,
+      Matnr: String(record.Matnr ?? ''),
+      ManufPartNr: String(record.ManufPartNr ?? ''),
+      EAN: String(record.EAN ?? ''),
+      ShortDescription: String(record.ShortDescription ?? ''),
+      ExistingStock: String(record.ExistingStock ?? ''),
+      ListPrice: asNumber(record.ListPrice).toFixed(2).replace('.', ','),
+      CustBestPrice: String(record.CustBestPrice ?? ''),
+      'Costo di Spedizione': String(record['Costo di Spedizione'] ?? '6,00'),
+      IVA: '22%',
+      'Prezzo con spediz e IVA': asNumber(record['Prezzo con spediz e IVA']).toFixed(2).replace('.', ','),
+      FeeDeRev: String(record.FeeDeRev ?? ''),
+      'Fee Marketplace': String(record['Fee Marketplace'] ?? ''),
+      'Subtotale post-fee': ceil2(record['Subtotale post-fee']).toFixed(2).replace('.', ','),
+      'Prezzo Finale': (typeof record['Prezzo Finale'] === 'string')
+        ? record['Prezzo Finale']
+        : asNumber(record['Prezzo Finale']).toFixed(2).replace('.', ','),
+      'ListPrice con Fee': (typeof record['ListPrice con Fee'] === 'string')
+        ? record['ListPrice con Fee']
+        : String(Math.ceil(asNumber(record['ListPrice con Fee'])))
+    }));
   };
 
   const onExportEAN = useCallback((event: React.MouseEvent) => {
@@ -1436,12 +1370,12 @@ const AltersideCatalogGenerator: React.FC = () => {
     
     // MPN export with validations
     try {
-      // Filter MPN rows from current processed data - only rows with non-empty ManufPartNr
+      // Filter MPN rows from current processed data
       const mpnRows = currentProcessedData.filter(record => record.ManufPartNr && record.ManufPartNr.trim().length > 0);
       
-      // Dataset MPN validation
+      // Validation guard
       if (!Array.isArray(mpnRows) || mpnRows.length === 0) {
-        console.warn('MPN: dataset vuoto, export annullato');
+        console.warn('mpn:empty');
         toast({
           title: "Nessuna riga valida per MPN",
           description: "Non ci sono record con ManufPartNr validi da esportare"
@@ -1449,16 +1383,24 @@ const AltersideCatalogGenerator: React.FC = () => {
         return;
       }
       
-      // Format data for export using the updated formatExcelData
-      const excelData = formatExcelData(mpnRows);
+      // Format data for export and remove internal columns
+      const excelData = formatExcelData(mpnRows).map(record => {
+        const cleanRecord = { ...record };
+        // Remove any internal columns like _eanFinalCents
+        Object.keys(cleanRecord).forEach(key => {
+          if (key.startsWith('_')) {
+            delete cleanRecord[key];
+          }
+        });
+        return cleanRecord;
+      });
       
-      // Validate ending ,99 for Prezzo Finale
+      // Validate ending 99 cents
       let invalidCount = 0;
-      excelData.forEach((record, index) => {
+      excelData.forEach(record => {
         const prezzoFinale = String(record['Prezzo Finale'] ?? '');
         if (!prezzoFinale.endsWith(',99')) {
           invalidCount++;
-          console.warn('mpnEnding99:ko', `row_${index + 1}`);
         }
       });
       
