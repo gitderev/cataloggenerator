@@ -1364,20 +1364,29 @@ const AltersideCatalogGenerator: React.FC = () => {
         throw new Error('File richiesti mancanti per la generazione SKU');
       }
 
-      // Get fee configuration from UI
-      const getFeesFromUI = (): Fee[] => {
-        const fees: Fee[] = [];
-        
-        // Convert feeConfig to SKU fee format
-        if (feeConfig.feeDrev && feeConfig.feeDrev !== 1) {
-          fees.push({ kind: 'percent', value: feeConfig.feeDrev - 1 }); // 1.05 -> 0.05
-        }
-        if (feeConfig.feeMkt && feeConfig.feeMkt !== 1) {
-          fees.push({ kind: 'percent', value: feeConfig.feeMkt - 1 }); // 1.08 -> 0.08
-        }
-        
-        return fees;
-      };
+          // Get fee configuration from UI with proper normalization
+          const getFeesFromUI = (): Fee[] => {
+            const fees: Fee[] = [];
+            
+            // Normalize fee input: if ≥ 1 interpret as multiplier, else as decimal percentage
+            const normalizeFee = (value: number): number => {
+              if (value >= 1) {
+                return value - 1; // 1.05 -> 0.05
+              } else {
+                return value; // 0.05 -> 0.05 (already decimal percentage)
+              }
+            };
+            
+            // Convert feeConfig to SKU fee format
+            if (feeConfig.feeDrev && feeConfig.feeDrev !== 1) {
+              fees.push({ kind: 'percent', value: normalizeFee(feeConfig.feeDrev) });
+            }
+            if (feeConfig.feeMkt && feeConfig.feeMkt !== 1) {
+              fees.push({ kind: 'percent', value: normalizeFee(feeConfig.feeMkt) });
+            }
+            
+            return fees;
+          };
 
       const cfg: SkuCfg = { 
         fees: getFeesFromUI(), 
@@ -1886,26 +1895,9 @@ const AltersideCatalogGenerator: React.FC = () => {
                 )}
               </button>
               <button
-                onClick={() => processDataPipeline('MPN')}
-                disabled={!canProcess || isProcessing}
-                className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isProcessing ? 'is-disabled' : ''}`}
-              >
-                {isProcessing && currentPipeline === 'MPN' ? (
-                  <>
-                    <Activity className="mr-3 h-5 w-5 animate-spin" />
-                    Elaborazione ManufPartNr...
-                  </>
-                ) : (
-                  <>
-                    <Upload className="mr-3 h-5 w-5" />
-                    GENERA EXCEL (ManufPartNr)
-                  </>
-                )}
-              </button>
-              <button
                 onClick={onGenerateSkuCatalog}
                 disabled={!canProcess || isExportingSKU}
-                className={`btn btn-secondary text-lg px-12 py-4 ${!canProcess || isExportingSKU ? 'is-disabled' : ''}`}
+                className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isExportingSKU ? 'is-disabled' : ''}`}
               >
                 {isExportingSKU ? (
                   <>
@@ -1914,8 +1906,8 @@ const AltersideCatalogGenerator: React.FC = () => {
                   </>
                 ) : (
                   <>
-                    <Download className="mr-3 h-5 w-5" />
-                    Genera catalogo SKU (ManufPartNr)
+                    <Upload className="mr-3 h-5 w-5" />
+                    GENERA EXCEL (ManufPartNr)
                   </>
                 )}
               </button>
