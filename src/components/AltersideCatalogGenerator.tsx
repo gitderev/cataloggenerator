@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from '@/hooks/use-toast';
-import { Upload, Download, FileText, CheckCircle, XCircle, AlertCircle, Clock, Activity, Info } from 'lucide-react';
+import { Upload, Download, FileText, CheckCircle, XCircle, AlertCircle, Clock, Activity, Info, X } from 'lucide-react';
 import { filterAndNormalizeForEAN, type EANStats, type DiscardedRow } from '@/utils/ean';
 import { forceEANText, exportDiscardedRowsCSV } from '@/utils/excelFormatter';
 import { 
@@ -1345,7 +1345,175 @@ const AltersideCatalogGenerator: React.FC = () => {
     }
   }, [currentProcessedData, isExportingEAN, dbg, toast]);
 
-  // SKU catalog generation function
+  // SKU Worker state
+  const [skuWorker, setSkuWorker] = useState<Worker | null>(null);
+  const [skuTimeout, setSkuTimeout] = useState<NodeJS.Timeout | null>(null);
+
+  // Initialize SKU worker
+  useEffect(() => {
+    const worker = new Worker('/alterside-sku-worker.js');
+    
+    worker.onmessage = (e) => {
+      const { type, ...data } = e.data;
+      
+      switch (type) {
+        case 'progress':
+          setProgressPct(data.progress);
+          break;
+          
+        case 'complete':
+          handleSkuComplete(data);
+          break;
+          
+        case 'error':
+          handleSkuError(data.error);
+          break;
+          
+        case 'cancelled':
+          handleSkuCancelled();
+          break;
+      }
+    };
+    
+    setSkuWorker(worker);
+    
+    return () => {
+      worker.terminate();
+    };
+  }, []);
+
+  const handleSkuComplete = (data: any) => {
+    if (skuTimeout) {
+      clearTimeout(skuTimeout);
+      setSkuTimeout(null);
+    }
+    
+    const { results, summary } = data;
+    
+    if (results.length === 0) {
+      toast({
+        title: "Nessuna riga valida",
+        description: "Nessuna riga valida per l'export SKU",
+        variant: "destructive"
+      });
+      setIsExportingSKU(false);
+      setProgressPct(0);
+      return;
+    }
+    
+    try {
+      // Create Excel file using minimal formatting (aligned with EAN utilities)
+      const timestamp = new Date().toLocaleString('it-IT', {
+        timeZone: 'Europe/Rome',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      }).replace(/[\/\s:]/g, match => match === '/' ? '' : match === ' ' ? '_' : '');
+      
+      const filename = `catalogo_sku_${timestamp}`;
+      const worksheet = XLSX.utils.json_to_sheet(results);
+      const workbook = XLSX.utils.book_new();
+      
+      // Apply minimal formatting - only what's specified
+      if (worksheet['!ref']) {
+        const range = XLSX.utils.decode_range(worksheet['!ref']);
+        
+        // Format IVA column as percentage
+        for (let C = range.s.c; C <= range.e.c; C++) {
+          const headerAddr = XLSX.utils.encode_cell({ r: 0, c: C });
+          const headerCell = worksheet[headerAddr];
+          if (headerCell && headerCell.v === 'IVA') {
+            for (let R = 1; R <= range.e.r; R++) {
+              const cellAddr = XLSX.utils.encode_cell({ r: R, c: C });
+              const cell = worksheet[cellAddr];
+              if (cell) {
+                cell.t = 'n';
+                cell.z = '0%';
+              }
+            }
+            break;
+          }
+        }
+        
+        // Format price columns with 2 decimals
+        const priceColumns = ['Costo di Spedizione', 'Prezzo con spedizione e IVA', 'FeeDeRev', 'Fee Marketplace', 'Subtotale post-fee', 'Prezzo Finale', 'CustBestPrice', 'ListPrice', 'ListPrice con Fee'];
+        priceColumns.forEach(colName => {
+          for (let C = range.s.c; C <= range.e.c; C++) {
+            const headerAddr = XLSX.utils.encode_cell({ r: 0, c: C });
+            const headerCell = worksheet[headerAddr];
+            if (headerCell && headerCell.v === colName) {
+              for (let R = 1; R <= range.e.r; R++) {
+                const cellAddr = XLSX.utils.encode_cell({ r: R, c: C });
+                const cell = worksheet[cellAddr];
+                if (cell && typeof cell.v === 'number') {
+                  cell.z = '0.00';
+                }
+              }
+              break;
+            }
+          }
+        });
+      }
+      
+      // Force EAN column as text (reusing EAN utility)
+      forceEANText(worksheet, 0);
+      
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'SKU');
+      XLSX.writeFile(workbook, `${filename}.xlsx`);
+      
+      toast({
+        title: "Catalogo SKU generato",
+        description: `${summary.exported} righe esportate (${summary.rejected} scartate)`,
+        variant: "default"
+      });
+      
+    } catch (error) {
+      console.error('Errore nella scrittura Excel SKU:', error);
+      toast({
+        title: "Errore nella scrittura file",
+        description: error instanceof Error ? error.message : 'Errore sconosciuto',
+        variant: "destructive"
+      });
+    } finally {
+      setIsExportingSKU(false);
+      setProgressPct(0);
+    }
+  };
+
+  const handleSkuError = (error: string) => {
+    if (skuTimeout) {
+      clearTimeout(skuTimeout);
+      setSkuTimeout(null);
+    }
+    
+    console.error('Errore nel worker SKU:', error);
+    toast({
+      title: "Errore",
+      description: error,
+      variant: "destructive"
+    });
+    setIsExportingSKU(false);
+    setProgressPct(0);
+  };
+
+  const handleSkuCancelled = () => {
+    if (skuTimeout) {
+      clearTimeout(skuTimeout);
+      setSkuTimeout(null);
+    }
+    
+    toast({
+      title: "Elaborazione annullata",
+      description: "Elaborazione SKU annullata dall'utente",
+      variant: "default"
+    });
+    setIsExportingSKU(false);
+    setProgressPct(0);
+  };
+
+  // SKU catalog generation function - now using Web Worker
   const onGenerateSkuCatalog = useCallback(async () => {
     if (isExportingSKU) {
       toast({
@@ -1355,50 +1523,70 @@ const AltersideCatalogGenerator: React.FC = () => {
       return;
     }
 
+    if (!skuWorker) {
+      toast({
+        title: "Worker non disponibile",
+        description: "Worker SKU non disponibile, riprovare",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    // Validate files are available
+    if (!files.material.file || !files.stock.file || !files.price.file) {
+      toast({
+        title: "File mancanti",
+        description: "File richiesti mancanti per la generazione SKU",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    // Validate fees ≥ 1.00
+    if (feeConfig.feeDrev < 1.00 || isNaN(feeConfig.feeDrev)) {
+      toast({
+        title: "Fee non valida",
+        description: "Inserisci un moltiplicatore ≥ 1,00 per FeeDeRev",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    if (feeConfig.feeMkt < 1.00 || isNaN(feeConfig.feeMkt)) {
+      toast({
+        title: "Fee non valida", 
+        description: "Inserisci un moltiplicatore ≥ 1,00 per Fee Marketplace",
+        variant: "destructive"
+      });
+      return;
+    }
+
     setIsExportingSKU(true);
-    dbg('sku:generation:start');
-
-    try {
-      // Validate files are available
-      if (!files.material.file || !files.stock.file || !files.price.file) {
-        throw new Error('File richiesti mancanti per la generazione SKU');
+    setProgressPct(0);
+    
+    // Set 60-second watchdog timeout
+    const timeout = setTimeout(() => {
+      if (skuWorker) {
+        skuWorker.postMessage({ type: 'cancel' });
+        toast({
+          title: "Timeout",
+          description: "Elaborazione SKU interrotta per timeout (60s). Riprovare con un dataset più piccolo.",
+          variant: "destructive"
+        });
+        setIsExportingSKU(false);
+        setProgressPct(0);
       }
-
-          // Get fee configuration from UI with proper validation and normalization
-          const getFeesFromUI = (): Fee[] => {
-            const fees: Fee[] = [];
-            
-            // Validate fees are ≥ 1.00
-            if (feeConfig.feeDrev < 1.00 || isNaN(feeConfig.feeDrev)) {
-              throw new Error('FeeDeRev: Inserisci un moltiplicatore ≥ 1,00');
-            }
-            if (feeConfig.feeMkt < 1.00 || isNaN(feeConfig.feeMkt)) {
-              throw new Error('Fee Marketplace: Inserisci un moltiplicatore ≥ 1,00');
-            }
-            
-            // Convert multiplier to percentage: p = multiplier - 1
-            if (feeConfig.feeDrev && feeConfig.feeDrev !== 1.00) {
-              fees.push({ kind: 'percent', value: feeConfig.feeDrev - 1.00 });
-            }
-            if (feeConfig.feeMkt && feeConfig.feeMkt !== 1.00) {
-              fees.push({ kind: 'percent', value: feeConfig.feeMkt - 1.00 });
-            }
-            
-            return fees;
-          };
-
-      const cfg: SkuCfg = { 
-        fees: getFeesFromUI(), 
-        shippingEuro: 6, 
-        vatRate: 0.22 
-      };
-
+    }, 60000);
+    
+    setSkuTimeout(timeout);
+    
+    try {
       // Load source data (same as EAN pipeline)
       const materialData = files.material.file.data;
       const stockData = files.stock.file.data;
       const priceData = files.price.file.data;
 
-      // Create joined dataset
+      // Create joined dataset (reusing EAN logic)
       const joinedData: any[] = [];
       materialData.forEach((material: any) => {
         const stock = stockData.find((s: any) => s.Matnr === material.Matnr);
@@ -1412,131 +1600,40 @@ const AltersideCatalogGenerator: React.FC = () => {
           });
         }
       });
-
-      dbg('sku:data:joined', { total: joinedData.length });
-
-      // Build SKU catalog
-      const skuRows = buildSkuCatalog(joinedData, cfg);
       
-      dbg('sku:catalog:built', { 
-        input: joinedData.length, 
-        output: skuRows.length,
-        rejected: joinedData.length - skuRows.length 
-      });
-
-      // Log sample for verification (first 3 rows)
-      skuRows.slice(0, 3).forEach((row, idx) => {
-        const baseCents = toCents(row.PrezzoBasePercorso);
-        const shipCents = toCents(6);
-        const preFeeC = Math.round((baseCents + shipCents) * 1.22);
-        const finalCents = toCents(row['Prezzo Finale']);
-        
-        console.warn(`sku:sample:${idx}`, {
-          base: row.PrezzoBasePercorso,
-          preFee: preFeeC / 100,
-          feeDeRev: row.FeeDeRev,
-          feeMkt: row['Fee Marketplace'],
-          final: finalCents / 100
-        });
-      });
-
-      // Prepare export data with exact column order
-      const exportData = skuRows.map(row => {
-        // Sanitize text fields
-        const sanitizeText = (value: any): string => {
-          let str = String(value ?? '');
-          if (str.startsWith('=') || str.startsWith('+') || str.startsWith('-') || str.startsWith('@')) {
-            str = "'" + str;
+      // Send data to worker
+      skuWorker.postMessage({
+        type: 'process',
+        data: {
+          sourceRows: joinedData,
+          fees: {
+            feeDeRev: feeConfig.feeDrev,
+            feeMarketplace: feeConfig.feeMkt
           }
-          return str.replace(/[\x00-\x1F\x7F]/g, ''); // Remove control characters
-        };
-
-        return {
-          'Matnr': sanitizeText(row.Matnr),
-          'ManufPartNr': sanitizeText(row.ManufPartNr),
-          'EAN': sanitizeText(row.EAN || ''),
-          'ShortDescription': sanitizeText(row.ShortDescription),
-          'ExistingStock': Number(row.ExistingStock),
-          'CustBestPrice': Number(row.CustBestPrice || 0),
-          'Costo di Spedizione': 6.00,
-          'IVA': 0.22,
-          'Prezzo con spedizione e IVA': Number(row['Prezzo con spedizione e IVA']),
-          'FeeDeRev': Number(row.FeeDeRev),
-          'Fee Marketplace': Number(row['Fee Marketplace']),
-          'Subtotale post-fee': Number(row['Subtotale post-fee']),
-          'Prezzo Finale': Number(row['Prezzo Finale']),
-          'ListPrice': Number(row.ListPrice || 0),
-          'ListPrice con Fee': row['ListPrice con Fee'] ? Number(row['ListPrice con Fee']) : ''
-        };
-      });
-
-      // Create Excel file
-      const ws = XLSX.utils.json_to_sheet(exportData);
-      
-      // Format EAN column as text
-      forceEANText(ws, 0);
-      
-      // Set column formats
-      const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-      for (let R = 1; R <= range.e.r; R++) {
-        // IVA as percentage
-        const ivaAddr = XLSX.utils.encode_cell({ r: R, c: 7 }); // IVA column
-        if (ws[ivaAddr]) {
-          ws[ivaAddr].z = '0%';
         }
-        
-        // Numeric columns with 2 decimals
-        const numericCols = [5, 6, 8, 9, 10, 11, 12, 14]; // Price columns
-        numericCols.forEach(colIndex => {
-          if (colIndex <= range.e.c) {
-            const addr = XLSX.utils.encode_cell({ r: R, c: colIndex });
-            if (ws[addr] && typeof ws[addr].v === 'number') {
-              ws[addr].z = '0.00';
-            }
-          }
-        });
-      }
-
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'SKU');
-
-      // Generate filename with timezone Europe/Rome
-      const now = new Date();
-      const romeTime = new Date(now.toLocaleString("en-US", {timeZone: "Europe/Rome"}));
-      const timestamp = romeTime.toISOString().slice(0, 16).replace('T', '_').replace(/:/g, '');
-      const filename = `catalogo_sku_${timestamp}.xlsx`;
-
-      XLSX.writeFile(wb, filename);
-
-      // Log final summary
-      const totalRead = joinedData.length;
-      const totalExported = skuRows.length;
-      const totalRejected = totalRead - totalExported;
+      });
       
-      console.warn('sku:summary', {
-        righe_lette: totalRead,
-        righe_esportate: totalExported,
-        righe_scartate: totalRejected
-      });
-
-      toast({
-        title: "Catalogo SKU generato",
-        description: `${totalExported} prodotti esportati in ${filename}`,
-        variant: "default"
-      });
-
     } catch (error) {
-      console.error('SKU generation error:', error);
+      if (timeout) {
+        clearTimeout(timeout);
+        setSkuTimeout(null);
+      }
+      console.error('Errore nell\'avvio elaborazione SKU:', error);
       toast({
-        title: "Errore durante la generazione SKU",
-        description: error instanceof Error ? error.message : "Errore sconosciuto",
+        title: "Errore",
+        description: error instanceof Error ? error.message : 'Errore sconosciuto',
         variant: "destructive"
       });
-    } finally {
       setIsExportingSKU(false);
-      dbg('sku:generation:end');
+      setProgressPct(0);
     }
-  }, [files, feeConfig, isExportingSKU, dbg, toast]);
+  }, [files, feeConfig, isExportingSKU, skuWorker, toast]);
+
+  const handleCancelSkuGeneration = () => {
+    if (skuWorker) {
+      skuWorker.postMessage({ type: 'cancel' });
+    }
+  };
 
   const downloadExcel = (type: 'ean' | 'manufpartnr') => {
     if (type === 'ean') {
@@ -1909,7 +2006,7 @@ const AltersideCatalogGenerator: React.FC = () => {
                 {isExportingSKU ? (
                   <>
                     <Activity className="mr-3 h-5 w-5 animate-spin" />
-                    Generazione SKU...
+                    Elaborazione SKU...
                   </>
                 ) : (
                   <>
@@ -1918,12 +2015,24 @@ const AltersideCatalogGenerator: React.FC = () => {
                   </>
                 )}
               </button>
+              
+              {/* Cancel button for SKU operation */}
+              {isExportingSKU && (
+                <button
+                  onClick={handleCancelSkuGeneration}
+                  className="btn btn-secondary text-lg px-8 py-4"
+                  title="Annulla elaborazione SKU"
+                >
+                  <X className="mr-2 h-5 w-5" />
+                  Annulla
+                </button>
+              )}
             </div>
           </div>
         )}
 
         {/* Progress Section */}
-        {(isProcessing || isCompleted) && (
+        {(isProcessing || isCompleted || isExportingSKU) && (
           <div className="card border-strong">
             <div className="card-body">
               <h3 className="card-title mb-6 flex items-center gap-2">
