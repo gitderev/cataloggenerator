@@ -960,7 +960,9 @@ const AltersideCatalogGenerator: React.FC = () => {
             FeeDeRev: feeConfig.feeDrev,
             'Fee Marketplace': feeConfig.feeMkt,
             'Subtotale post-fee': calc.postFee,
-            'Prezzo Finale': currentPipeline === 'EAN' ? calc.eanResult.finalDisplay : calc.prezzoFinaleMPN,
+            'Prezzo Finale': currentPipeline === 'EAN'
+              ? calc.eanResult.finalDisplay
+              : (function(){ const cents = Math.round(calc.postFee*100); const up99 = (Math.floor(cents/100)+1)*100 - 1; return (up99/100).toFixed(2).replace('.', ','); })(),
             'ListPrice con Fee': calc.listPriceConFee
           };
 
@@ -1051,13 +1053,15 @@ const AltersideCatalogGenerator: React.FC = () => {
   };
 
   const formatExcelData = (data: ProcessedRecord[]) => {
-    // Helper function for safe number conversion
+    // Helper functions for safe number conversion
     const asNumber = (v) => { 
       const n = typeof v === 'string' ? parseFloat(v.replace('.', '').replace(',', '.')) : Number(v); 
       return Number.isFinite(n) ? n : 0; 
     };
+    const ceil2 = (v) => Math.ceil(asNumber(v) * 100) / 100;
 
     return data.map(record => ({
+      ...record,
       Matnr: String(record.Matnr ?? ''),
       ManufPartNr: String(record.ManufPartNr ?? ''),
       EAN: String(record.EAN ?? ''),
@@ -1066,11 +1070,11 @@ const AltersideCatalogGenerator: React.FC = () => {
       ListPrice: asNumber(record.ListPrice).toFixed(2).replace('.', ','),
       CustBestPrice: String(record.CustBestPrice ?? ''),
       'Costo di Spedizione': String(record['Costo di Spedizione'] ?? '6,00'),
-      IVA: String(record.IVA ?? '22%'),
+      IVA: '22%',
       'Prezzo con spediz e IVA': asNumber(record['Prezzo con spediz e IVA']).toFixed(2).replace('.', ','),
       FeeDeRev: String(record.FeeDeRev ?? ''),
       'Fee Marketplace': String(record['Fee Marketplace'] ?? ''),
-      'Subtotale post-fee': asNumber(record['Subtotale post-fee']).toFixed(2).replace('.', ','),
+      'Subtotale post-fee': ceil2(record['Subtotale post-fee']).toFixed(2).replace('.', ','),
       'Prezzo Finale': (typeof record['Prezzo Finale'] === 'string')
         ? record['Prezzo Finale']
         : asNumber(record['Prezzo Finale']).toFixed(2).replace('.', ','),
