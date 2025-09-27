@@ -88,6 +88,41 @@ const AltersideCatalogGenerator = () => {
     });
   }, []);
 
+  // Log gate values and CSS validation on each render
+  useEffect(() => {
+    const allFilesValid = materialValid && stockValid && priceValid;
+    
+    // Gate visibility logging
+    addDebugEvent(`gate_log: materialValid=${materialValid}, stockValid=${stockValid}, priceValid=${priceValid}, stockReady=${stockReady}, priceReady=${priceReady}, allFilesValid=${allFilesValid}, diagnosticState.isEnabled=${diagnosticState.isEnabled}`);
+    
+    // CSS Variables validation
+    const vars = {
+      background: getComputedStyle(document.documentElement).getPropertyValue('--background').trim(),
+      card: getComputedStyle(document.documentElement).getPropertyValue('--card').trim(),
+      muted: getComputedStyle(document.documentElement).getPropertyValue('--muted').trim(),
+      primary: getComputedStyle(document.documentElement).getPropertyValue('--primary').trim(),
+      ring: getComputedStyle(document.documentElement).getPropertyValue('--ring').trim(),
+      input: getComputedStyle(document.documentElement).getPropertyValue('--input').trim()
+    };
+    const bodyBg = getComputedStyle(document.body).backgroundColor;
+    
+    addDebugEvent(`css_vars: --background="${vars.background}", --card="${vars.card}", --muted="${vars.muted}", --primary="${vars.primary}", --ring="${vars.ring}", --input="${vars.input}"`);
+    addDebugEvent(`body_bg: ${bodyBg}`);
+    
+    // Button probe after render
+    setTimeout(() => {
+      ['btn-ean', 'btn-sku', 'btn-diag'].forEach(btnId => {
+        const btn = document.querySelector(`[data-id="${btnId}"]`) as HTMLElement;
+        if (btn) {
+          const styles = getComputedStyle(btn);
+          addDebugEvent(`btn_${btnId}: exists=true, display="${styles.display}", visibility="${styles.visibility}", opacity="${styles.opacity}", pointerEvents="${styles.pointerEvents}", color="${styles.color}", backgroundColor="${styles.backgroundColor}"`);
+        } else {
+          addDebugEvent(`btn_${btnId}: missing_in_dom`);
+        }
+      });
+    }, 100);
+  });
+
   // Update ready states when data changes
   useEffect(() => {
     setStockReady(stockValid && stockData.length > 0);
@@ -462,7 +497,7 @@ const AltersideCatalogGenerator = () => {
           />
         </div>
 
-        {/* Actions */}
+        {/* Actions - ALWAYS RENDERED */}
         <Card className="mb-6 p-6">
           <div className="space-y-4">
             
@@ -491,6 +526,7 @@ const AltersideCatalogGenerator = () => {
                 disabled={isProcessing}
                 variant="outline"
                 className="w-full"
+                data-id="btn-diag"
               >
                 <Activity className="mr-2 h-4 w-4" />
                 Diagnostica prescan
@@ -505,8 +541,9 @@ const AltersideCatalogGenerator = () => {
                   handleEanGeneration();
                 }}
                 disabled={isProcessing || !allFilesValid}
+                variant="default"
                 className="h-12"
-                data-button="ean"
+                data-id="btn-ean"
               >
                 <Download className="mr-2 h-4 w-4" />
                 GENERA EXCEL (EAN)
@@ -518,8 +555,9 @@ const AltersideCatalogGenerator = () => {
                   handleSkuGeneration();
                 }}
                 disabled={isProcessing || !allFilesValid}
+                variant="default"
                 className="h-12"
-                data-button="sku"
+                data-id="btn-sku"
               >
                 <Download className="mr-2 h-4 w-4" />
                 GENERA EXCEL (ManufPartNr)

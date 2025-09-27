@@ -61,16 +61,36 @@ export const CalculationRules: React.FC<CalculationRulesProps> = ({
       </div>
 
       <div className="mt-6 p-4 bg-muted rounded-lg">
-        <h4 className="font-medium mb-2">Regole Applicate:</h4>
-        <ul className="text-sm text-muted-foreground space-y-1">
-          <li>• SKU include righe con ManufPartNr non vuoto anche se EAN vuoto</li>
-          <li>• Filtro ExistingStock {'>'} 1</li>
-          <li>• Prezzo base CustBestPrice con fallback ListPrice</li>
-          <li>• Spedizione 6€ fissi</li>
-          <li>• IVA 22% percentuale fissa</li>
-          <li>• Ordine fee: prima DeRev poi Marketplace</li>
-          <li>• Prezzo finale SKU arrotondato all'euro superiore</li>
-        </ul>
+        <h4 className="font-medium mb-3 text-foreground">Regole Applicate:</h4>
+        
+        {/* Sezione EAN */}
+        <div className="mb-4">
+          <h5 className="font-medium text-sm mb-2 text-foreground">EAN:</h5>
+          <ul className="text-sm text-muted-foreground space-y-1">
+            <li>• Inclusione: solo righe con EAN non vuoto</li>
+            <li>• Filtri comuni: ExistingStock &gt; 1, prezzo base numerico valido</li>
+            <li>• Prezzo base: CustBestPrice valido, altrimenti ListPrice</li>
+            <li>• Spedizione: 6€ fissi</li>
+            <li>• IVA: 22% percentuale fissa</li>
+            <li>• Fee: moltiplicatori ≥ 1,00, ordine sequenziale FeeDeRev poi Fee Marketplace, importi fee mostrati in euro</li>
+            <li>• Prezzo finale EAN: forzato a terminare con ",99" (centesimi 0,99)</li>
+          </ul>
+        </div>
+
+        {/* Sezione SKU (ManufPartNr) */}
+        <div>
+          <h5 className="font-medium text-sm mb-2 text-foreground">SKU (ManufPartNr):</h5>
+          <ul className="text-sm text-muted-foreground space-y-1">
+            <li>• Inclusione: tutte le righe con ManufPartNr non vuoto, anche se EAN vuoto</li>
+            <li>• Filtri: ExistingStock &gt; 1, prezzo base numerico valido</li>
+            <li>• Prezzo base: CustBestPrice valido, fallback ListPrice</li>
+            <li>• Spedizione: 6€ fissi</li>
+            <li>• IVA: 22% percentuale fissa</li>
+            <li>• Fee: moltiplicatori ≥ 1,00, ordine FeeDeRev poi Fee Marketplace, importi fee mostrati in euro</li>
+            <li>• Prezzo finale SKU: arrotondato all'euro superiore</li>
+            <li>• "ListPrice con Fee": valorizzato solo se ListPrice valido, altrimenti cella vuota</li>
+          </ul>
+        </div>
       </div>
     </Card>
   );
