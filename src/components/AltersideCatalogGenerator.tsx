@@ -528,6 +528,33 @@ const AltersideCatalogGenerator = () => {
             {/* Eventi Debug */}
             <Card className="p-6">
               <h3 className="text-lg font-semibold mb-4">Eventi Debug</h3>
+              
+              {/* Runtime CSS Variables Validation */}
+              <div className="mb-4 p-3 bg-muted rounded border">
+                <h4 className="font-medium text-sm mb-2">Validazione CSS Variables</h4>
+                <div className="text-xs font-mono space-y-1">
+                  {(() => {
+                    const bg = getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
+                    const card = getComputedStyle(document.documentElement).getPropertyValue('--card').trim();
+                    const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim();
+                    
+                    return (
+                      <>
+                        <div className={bg === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
+                          --background: "{bg}" {bg === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
+                        </div>
+                        <div className={card === '0 0% 100%' ? 'text-green-600' : 'text-red-600'}>
+                          --card: "{card}" {card === '0 0% 100%' ? '✓' : '✗ Expected: "0 0% 100%"'}
+                        </div>
+                        <div className={muted === '210 40% 96%' ? 'text-green-600' : 'text-red-600'}>
+                          --muted: "{muted}" {muted === '210 40% 96%' ? '✓' : '✗ Expected: "210 40% 96%"'}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+
               <div className="bg-muted p-3 rounded max-h-32 overflow-y-auto">
                 {debugEvents.length === 0 ? (
                   <div className="text-muted-foreground text-sm">Nessun evento registrato</div>
