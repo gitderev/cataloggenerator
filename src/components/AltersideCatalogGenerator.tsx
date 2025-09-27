@@ -235,6 +235,39 @@ function computeFinalPrice({
   return { base, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee, eanResult };
 }
 
+// Diagnostic state
+interface DiagnosticState {
+  isEnabled: boolean;
+  maxRows: number;
+  workerMessages: Array<{ id: number; timestamp: string; data: any }>;
+  statistics: {
+    total: number;
+    batchSize: number;
+    elapsedPrescan: number;
+    elapsedSku: number;
+    progressPct: number;
+    heartbeatAgeMs: number;
+  };
+  errorCounters: {
+    msgInvalid: number;
+    workerError: number;
+    timeouts: number;
+  };
+  lastHeartbeat: number;
+  testResults: Array<{ test: string; status: 'pass' | 'fail'; error?: string }>;
+}
+
+// Valid worker message schemas
+const WORKER_MESSAGE_SCHEMAS = {
+  worker_ready: ['type', 'version'],
+  prescan_progress: ['type', 'done', 'total'],
+  prescan_done: ['type', 'counts', 'total'],
+  sku_progress: ['type', 'done', 'total'],
+  sku_done: ['type', 'exported', 'rejected', 'total'],
+  worker_error: ['type', 'message', 'where'],
+  pong: ['type']
+} as const;
+
 const AltersideCatalogGenerator: React.FC = () => {
   const [files, setFiles] = useState<FileUploadState>({
     material: { file: null, status: 'empty' },
@@ -245,6 +278,28 @@ const AltersideCatalogGenerator: React.FC = () => {
   // Fee configuration
   const [feeConfig, setFeeConfig] = useState<FeeConfig>(loadFees());
   const [rememberFees, setRememberFees] = useState(false);
+
+  // Diagnostic state
+  const [diagnosticState, setDiagnosticState] = useState<DiagnosticState>({
+    isEnabled: false,
+    maxRows: 200,
+    workerMessages: [],
+    statistics: {
+      total: 0,
+      batchSize: 1000,
+      elapsedPrescan: 0,
+      elapsedSku: 0,
+      progressPct: 0,
+      heartbeatAgeMs: 0
+    },
+    errorCounters: {
+      msgInvalid: 0,
+      workerError: 0,
+      timeouts: 0
+    },
+    lastHeartbeat: 0,
+    testResults: []
+  });
 
   // Save fees when rememberFees is checked
   useEffect(() => {
@@ -317,6 +372,144 @@ const AltersideCatalogGenerator: React.FC = () => {
   const [isExportingSKU, setIsExportingSKU] = useState(false);
 
   const workerRef = useRef<Worker | null>(null);
+  
+  // Diagnostic functions
+  const validateWorkerMessage = useCallback((data: any) => {
+    if (!data || typeof data !== 'object' || !('type' in data)) {
+      setDiagnosticState(prev => ({
+        ...prev,
+        errorCounters: { ...prev.errorCounters, msgInvalid: prev.errorCounters.msgInvalid + 1 }
+      }));
+      // dbg will be defined later in the component
+      console.warn('worker_msg_invalid', { receivedKeys: Object.keys(data || {}), expectedKeys: ['type'] });
+      return false;
+    }
+
+    const type = data.type as string;
+    const expectedKeys = WORKER_MESSAGE_SCHEMAS[type as keyof typeof WORKER_MESSAGE_SCHEMAS];
+    
+    if (!expectedKeys) {
+      setDiagnosticState(prev => ({
+        ...prev,
+        errorCounters: { ...prev.errorCounters, msgInvalid: prev.errorCounters.msgInvalid + 1 }
+      }));
+      dbg('worker_msg_invalid', { type, receivedKeys: Object.keys(data), expectedKeys: 'unknown_type' });
+      return false;
+    }
+
+    const missingKeys = expectedKeys.filter(key => !(key in data));
+    if (missingKeys.length > 0) {
+      setDiagnosticState(prev => ({
+        ...prev,
+        errorCounters: { ...prev.errorCounters, msgInvalid: prev.errorCounters.msgInvalid + 1 }
+      }));
+      console.warn('worker_msg_invalid', { type, receivedKeys: Object.keys(data), expectedKeys, missingKeys });
+      return false;
+    }
+
+    return true;
+  }, []);
+
+  const addWorkerMessage = useCallback((data: any) => {
+    const timestamp = new Date().toLocaleTimeString('it-IT', { hour12: false });
+    const messageId = Date.now();
+    
+    setDiagnosticState(prev => ({
+      ...prev,
+      workerMessages: [...prev.workerMessages.slice(-9), { id: messageId, timestamp, data }],
+      lastHeartbeat: Date.now()
+    }));
+  }, []);
+
+  const runDiagnosticTests = useCallback(async () => {
+    const testResults: Array<{ test: string; status: 'pass' | 'fail'; error?: string }> = [];
+    
+    try {
+      // Test 1: Protocol check
+      const workerReadyReceived = diagnosticState.workerMessages.some(msg => msg.data.type === 'worker_ready');
+      const prescanProgressReceived = diagnosticState.workerMessages.some(msg => 
+        msg.data.type === 'prescan_progress' && msg.data.done === 0
+      );
+      
+      if (!workerReadyReceived || !prescanProgressReceived) {
+        testResults.push({ test: 'Protocollo', status: 'fail', error: 'worker_ready o prescan_progress non ricevuti' });
+      } else {
+        testResults.push({ test: 'Protocollo', status: 'pass' });
+      }
+
+      // Test 2: Progress check
+      const prescanProgress = diagnosticState.workerMessages.find(msg => msg.data.type === 'prescan_progress');
+      if (!prescanProgress || prescanProgress.data.done <= 0) {
+        testResults.push({ test: 'Progress', status: 'fail', error: 'Nessun avanzamento prescan' });
+      } else {
+        testResults.push({ test: 'Progress', status: 'pass' });
+      }
+
+      // Test 3: Schema check
+      const prescanDone = diagnosticState.workerMessages.find(msg => msg.data.type === 'prescan_done');
+      if (!prescanDone || !prescanDone.data.counts) {
+        testResults.push({ test: 'Schema', status: 'fail', error: 'prescan_done assente/malformato' });
+      } else {
+        testResults.push({ test: 'Schema', status: 'pass' });
+      }
+
+      // Test 4: Numeric check (sample calculation)
+      const sampleResult = computeFinalPrice({
+        CustBestPrice: 100,
+        ListPrice: 100,
+        feeDrev: 1.03,
+        feeMkt: 1.15
+      });
+      
+      if (Math.abs(sampleResult.prezzoFinaleMPN - 154) > 1) {
+        testResults.push({ test: 'Numerico', status: 'fail', error: 'calcolo SKU non coerente' });
+      } else {
+        testResults.push({ test: 'Numerico', status: 'pass' });
+      }
+
+    } catch (error) {
+      testResults.push({ test: 'Generale', status: 'fail', error: error instanceof Error ? error.message : 'Errore test' });
+    }
+
+    setDiagnosticState(prev => ({ ...prev, testResults }));
+    return testResults;
+  }, [diagnosticState.workerMessages]);
+
+  const generateDiagnosticBundle = useCallback(() => {
+    const bundle = {
+      ua: navigator.userAgent,
+      url: window.location.href,
+      appVersion: '1.0.0',
+      workerVersion: 'blob',
+      batchSize: diagnosticState.statistics.batchSize,
+      fileCounts: {
+        material: files.material.file?.data.length || 0,
+        stock: files.stock.file?.data.length || 0,
+        price: files.price.file?.data.length || 0
+      },
+      sequenceEvents: debugEvents.slice(-20),
+      workerMessagesFirst10: diagnosticState.workerMessages.slice(0, 10),
+      workerMessagesLast5: diagnosticState.workerMessages.slice(-5),
+      stats: diagnosticState.statistics,
+      firstWorkerError: diagnosticState.workerMessages.find(msg => msg.data.type === 'worker_error')?.data || null,
+      errorCounters: diagnosticState.errorCounters,
+      testResults: diagnosticState.testResults
+    };
+
+    navigator.clipboard.writeText(JSON.stringify(bundle, null, 2)).then(() => {
+      toast({
+        title: "Bundle diagnostico copiato",
+        description: "Il bundle diagnostico è stato copiato negli appunti",
+        variant: "default"
+      });
+    }).catch(() => {
+      toast({
+        title: "Errore copia bundle",
+        description: "Impossibile copiare il bundle negli appunti",
+        variant: "destructive"
+      });
+    });
+  }, [diagnosticState, debugEvents, files, toast]);
 
   const isProcessing = processingState === 'running';
   const isCompleted = processingState === 'done';
@@ -1491,9 +1684,43 @@ const AltersideCatalogGenerator: React.FC = () => {
     setProgressPct(0);
   };
 
+  // Diagnostic SKU function
+  const runDiagnosticSku = useCallback(async () => {
+    dbg('click_diag');
+    
+    // Reset diagnostic state
+    setDiagnosticState(prev => ({
+      ...prev,
+      workerMessages: [],
+      errorCounters: { msgInvalid: 0, workerError: 0, timeouts: 0 },
+      testResults: [],
+      lastHeartbeat: 0
+    }));
+
+    // Limit data to diagnostic rows if enabled
+    const materialData = diagnosticState.isEnabled ? 
+      files.material.file?.data.slice(0, diagnosticState.maxRows) || [] : 
+      files.material.file?.data || [];
+    
+    const stockData = files.stock.file?.data || [];
+    const priceData = files.price.file?.data || [];
+
+    // Calculate total for diagnostic mode
+    const total = materialData.filter(row => row.ManufPartNr && String(row.ManufPartNr).trim()).length;
+    
+    setDiagnosticState(prev => ({ 
+      ...prev, 
+      statistics: { ...prev.statistics, total } 
+    }));
+
+    await createSkuBlobWorker(true, { materialData, stockData, priceData });
+  }, [diagnosticState.isEnabled, diagnosticState.maxRows, files, dbg]);
+
   // Create blob worker with handshake gate
-  const createSkuBlobWorker = useCallback(async () => {
-    console.log('click_sku');
+  const createSkuBlobWorker = useCallback(async (isDiagnostic = false, overrideData?: any) => {
+    if (!isDiagnostic) {
+      console.log('click_sku');
+    }
     
     if (isExportingSKU) {
       toast({
@@ -1540,6 +1767,7 @@ const AltersideCatalogGenerator: React.FC = () => {
 
     // Generate version hash for cache busting
     const version = Date.now().toString(36);
+    dbg('worker_created', { type: 'blob', version });
     
     // Self-contained worker code - completely inline
     const workerCode = `
@@ -1552,7 +1780,7 @@ let indexByMPN = new Map();
 let indexByEAN = new Map();
 
 // Send ready signal immediately on worker start
-self.postMessage({ type: 'worker_ready' });
+self.postMessage({ type: 'worker_ready', version: '${version}' });
 
 // Wrap all message handling in try/catch for error safety
 self.onmessage = function(e) {
@@ -2504,7 +2732,7 @@ function processSkuRow(row, feeDeRevPercent, feeMktPercent, rejects, rowIndex) {
                 )}
               </button>
               <button
-                onClick={createSkuBlobWorker}
+                onClick={() => createSkuBlobWorker(false)}
                 disabled={!(debugState.materialValid && debugState.stockValid && debugState.priceValid) || isExportingSKU}
                 className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isExportingSKU ? 'is-disabled' : ''}`}
               >
