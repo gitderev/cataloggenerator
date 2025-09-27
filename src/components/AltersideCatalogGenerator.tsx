@@ -1348,60 +1348,17 @@ const AltersideCatalogGenerator: React.FC = () => {
   // SKU Worker state
   const [skuWorker, setSkuWorker] = useState<Worker | null>(null);
   const [skuTimeout, setSkuTimeout] = useState<NodeJS.Timeout | null>(null);
-  const [workerHandshakeTimeout, setWorkerHandshakeTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [workerReady, setWorkerReady] = useState(false);
+  const [firstBatchTime, setFirstBatchTime] = useState<number | null>(null);
 
-  // Initialize SKU worker with handshake timeout
+  // Cleanup worker on unmount
   useEffect(() => {
-    const worker = new Worker('/alterside-sku-worker.js');
-    
-    // Set 1s timeout for worker handshake
-    const handshakeTimeout = setTimeout(() => {
-      console.warn('Worker handshake timeout, recreating worker');
-      worker.terminate();
-      const newWorker = new Worker('/alterside-sku-worker.js');
-      setSkuWorker(newWorker);
-    }, 1000);
-    
-    setWorkerHandshakeTimeout(handshakeTimeout);
-    
-    worker.onmessage = (e) => {
-      const { type, ...data } = e.data;
-      
-      if (type === 'worker_ready') {
-        if (workerHandshakeTimeout) {
-          clearTimeout(workerHandshakeTimeout);
-          setWorkerHandshakeTimeout(null);
-        }
-        dbg('worker_ready');
-      } else if (type === 'prescan_progress') {
-        setProgressPct(Math.round(data.progress));
-      } else if (type === 'prescan_done') {
-        dbg('prescan_done { n: ' + data.counts + ' }');
-        setDebugState(prev => ({ ...prev, materialPreScanDone: true }));
-        setProcessingState('ready');
-        // Now start SKU processing
-        startSkuProcessing();
-      } else if (type === 'progress') {
-        setProgressPct(Math.round((data.recordsProcessed / data.totalRecords) * 100));
-      } else if (type === 'complete') {
-        dbg('sku_done { exported: ' + data.results.length + ', rejected: ' + data.summary.rejected + ' }');
-        setProcessingState('done');
-        handleSkuComplete(data);
-      } else if (type === 'error') {
-        setProcessingState('error');
-        handleSkuError(data.error);
-      } else if (type === 'cancelled') {
-        setProcessingState('idle');
-        handleSkuCancelled();
+    return () => {
+      if (skuWorker) {
+        skuWorker.terminate();
       }
     };
-    
-    setSkuWorker(worker);
-    
-    return () => {
-      worker.terminate();
-    };
-  }, []);
+  }, [skuWorker]);
 
   const handleSkuComplete = (data: any) => {
     if (skuTimeout) {
@@ -1534,21 +1491,14 @@ const AltersideCatalogGenerator: React.FC = () => {
     setProgressPct(0);
   };
 
-  // SKU catalog generation function - now using state machine
-  const onGenerateSkuCatalog = useCallback(async () => {
+  // Create blob worker with handshake gate
+  const createSkuBlobWorker = useCallback(async () => {
+    console.log('click_sku');
+    
     if (isExportingSKU) {
       toast({
         title: "Generazione in corso...",
         description: "Attendere completamento della generazione corrente"
-      });
-      return;
-    }
-
-    if (!skuWorker) {
-      toast({
-        title: "Worker non disponibile",
-        description: "Worker SKU non disponibile, riprovare",
-        variant: "destructive"
       });
       return;
     }
@@ -1582,104 +1532,613 @@ const AltersideCatalogGenerator: React.FC = () => {
       return;
     }
 
-    setIsExportingSKU(true);
-    setProgressPct(0);
-    dbg('click_sku');
+    // Cleanup existing worker
+    if (skuWorker) {
+      skuWorker.terminate();
+      setSkuWorker(null);
+    }
+
+    // Generate version hash for cache busting
+    const version = Date.now().toString(36);
     
-    // State machine: idle → ready → prescanning? → running → done|error
-    if (!debugState.materialPreScanDone) {
-      // Need prescan first
-      setProcessingState('prescanning');
-      dbg('prescan_start');
-      
-      skuWorker.postMessage({
-        type: 'prescan',
-        data: {
-          materialData: files.material.file.data,
-          stockData: files.stock.file.data,
-          priceData: files.price.file.data
-        }
-      });
-    } else {
-      // Skip prescan, go directly to SKU processing
-      startSkuProcessing();
+    // Self-contained worker code - completely inline
+    const workerCode = `
+// alterside-sku-worker.js - Self-contained SKU processing worker
+// Optimized for performance with batch processing and minimal overhead
+
+let isProcessing = false;
+let shouldCancel = false;
+let indexByMPN = new Map();
+let indexByEAN = new Map();
+
+// Send ready signal immediately on worker start
+self.postMessage({ type: 'worker_ready' });
+
+// Wrap all message handling in try/catch for error safety
+self.onmessage = function(e) {
+  try {
+    const { type, data } = e.data;
+    
+    if (type === 'cancel') {
+      shouldCancel = true;
+      return;
     }
     
-    // Set 60-second watchdog timeout
-    const timeout = setTimeout(() => {
-      if (skuWorker) {
-        skuWorker.postMessage({ type: 'cancel' });
+    if (type === 'prescan') {
+      try {
+        shouldCancel = false;
+        isProcessing = true;
+        performPreScan(data);
+      } catch (error) {
+        self.postMessage({
+          type: 'worker_error',
+          message: error instanceof Error ? error.message : 'Errore durante pre-scan',
+          stack: error instanceof Error ? error.stack : null
+        });
+      } finally {
+        isProcessing = false;
+      }
+    }
+    
+    if (type === 'process') {
+      try {
+        shouldCancel = false;
+        isProcessing = true;
+        processSkuCatalog(data);
+      } catch (error) {
+        self.postMessage({
+          type: 'worker_error',
+          message: error instanceof Error ? error.message : 'Errore sconosciuto durante elaborazione SKU',
+          stack: error instanceof Error ? error.stack : null
+        });
+      } finally {
+        isProcessing = false;
+      }
+    }
+  } catch (globalError) {
+    // Catch any top-level errors in message handling
+    self.postMessage({
+      type: 'worker_error',
+      message: globalError instanceof Error ? globalError.message : 'Errore critico nel worker',
+      stack: globalError instanceof Error ? globalError.stack : null
+    });
+  }
+};
+
+// Inline utility functions (identical to EAN architecture)
+function parseEuroLike(input) {
+  if (typeof input === 'number' && isFinite(input)) return input;
+  let s = String(input ?? '').trim();
+  s = s.replace(/[^\\d.,\\s%\\-]/g, '').trim();
+  s = s.split(/\\s+/)[0] ?? '';
+  s = s.replace(/%/g, '').trim();
+  if (!s) return NaN;
+
+  if (s.includes('.') && s.includes(',')) s = s.replace(/\\./g, '').replace(',', '.');
+  else s = s.replace(',', '.');
+
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function toCents(x, fallback = 0) {
+  const n = parseEuroLike(x);
+  return Number.isFinite(n) ? Math.round(n * 100) : Math.round(fallback * 100);
+}
+
+function sanitizeEAN(ean) {
+  if (!ean) return '';
+  const str = String(ean).trim();
+  if (!str) return '';
+  
+  // Sanitize if starts with formula chars or contains control chars
+  const needsSanitization = /^[=+\\-@]/.test(str) || /[\\x00-\\x1F\\x7F]/.test(str);
+  return needsSanitization ? "'" + str : str;
+}
+
+function validateMultiplier(value) {
+  const num = parseEuroLike(value);
+  return Number.isFinite(num) && num >= 1.0 ? num : null;
+}
+
+// Pre-scan function to build indices
+async function performPreScan({ materialData, stockData, priceData }) {
+  const BATCH_SIZE = 2000;
+  
+  let processed = 0;
+  const totalData = materialData.length;
+  
+  self.postMessage({
+    type: 'prescan_progress',
+    done: 0,
+    total: totalData
+  });
+  
+  // Build ManufPartNr index
+  indexByMPN.clear();
+  for (let i = 0; i < materialData.length; i += BATCH_SIZE) {
+    if (shouldCancel) {
+      self.postMessage({ type: 'cancelled' });
+      return;
+    }
+    
+    const batch = materialData.slice(i, Math.min(i + BATCH_SIZE, materialData.length));
+    
+    for (const record of batch) {
+      const mpn = String(record.ManufPartNr ?? '').trim();
+      if (mpn) {
+        indexByMPN.set(mpn, record);
+      }
+      processed++;
+    }
+    
+    self.postMessage({
+      type: 'prescan_progress',
+      done: processed,
+      total: totalData
+    });
+    
+    // Yield to main thread
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  
+  // Build EAN index
+  indexByEAN.clear();
+  for (let i = 0; i < materialData.length; i += BATCH_SIZE) {
+    if (shouldCancel) {
+      self.postMessage({ type: 'cancelled' });
+      return;
+    }
+    
+    const batch = materialData.slice(i, Math.min(i + BATCH_SIZE, materialData.length));
+    
+    for (const record of batch) {
+      const ean = String(record.EAN ?? '').trim();
+      if (ean) {
+        indexByEAN.set(ean, record);
+      }
+    }
+    
+    // Yield to main thread
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+
+  self.postMessage({
+    type: 'prescan_done',
+    counts: {
+      mpnRecords: indexByMPN.size,
+      eanRecords: indexByEAN.size,
+      totalMaterial: materialData.length
+    }
+  });
+}
+
+async function processSkuCatalog({ sourceRows, fees }) {
+  const startTime = Date.now();
+  let BATCH_SIZE = 2000;
+  const MIN_BATCH_SIZE = 1000;
+  
+  const totalRows = sourceRows.length;
+  let processedCount = 0;
+  let firstBatchTime = 0;
+  
+  const results = [];
+  const rejects = [];
+  
+  // Validate and convert fees
+  const feeDeRevMultiplier = validateMultiplier(fees.feeDeRev);
+  const feeMktMultiplier = validateMultiplier(fees.feeMarketplace);
+  
+  if (feeDeRevMultiplier === null || feeMktMultiplier === null) {
+    throw new Error('Inserisci un moltiplicatore ≥ 1,00');
+  }
+  
+  const feeDeRevPercent = feeDeRevMultiplier - 1;
+  const feeMktPercent = feeMktMultiplier - 1;
+  
+  self.postMessage({
+    type: 'progress',
+    progress: 0,
+    recordsProcessed: 0,
+    totalRecords: totalRows
+  });
+  
+  // Process in batches
+  for (let i = 0; i < totalRows; i += BATCH_SIZE) {
+    if (shouldCancel) {
+      self.postMessage({ type: 'cancelled' });
+      return;
+    }
+    
+    const batchStart = Date.now();
+    const batch = sourceRows.slice(i, Math.min(i + BATCH_SIZE, totalRows));
+    
+    // Process batch
+    for (const row of batch) {
+      const result = processSkuRow(row, feeDeRevPercent, feeMktPercent, rejects, processedCount);
+      if (result) {
+        results.push(result);
+      }
+      processedCount++;
+    }
+    
+    const batchTime = Date.now() - batchStart;
+    
+    // Store first batch time for dynamic watchdog
+    if (i === 0) {
+      firstBatchTime = batchTime;
+      self.postMessage({
+        type: 'first_batch_time',
+        time: firstBatchTime
+      });
+    }
+    
+    // Adjust batch size if processing is too slow
+    if (batchTime > 1500 && BATCH_SIZE > MIN_BATCH_SIZE) {
+      BATCH_SIZE = MIN_BATCH_SIZE;
+    }
+    
+    // Send progress update
+    const progress = Math.round((processedCount / totalRows) * 100);
+    self.postMessage({
+      type: 'progress',
+      progress,
+      recordsProcessed: processedCount,
+      totalRecords: totalRows
+    });
+    
+    // Yield to main thread
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  
+  const processingTime = Date.now() - startTime;
+  
+  // Log summary (only final summary, no per-row logging)
+  const summary = {
+    totalRows,
+    exported: results.length,
+    rejected: rejects.length,
+    processingTimeMs: processingTime,
+    rejectReasons: rejects.reduce((acc, r) => {
+      acc[r.reason] = (acc[r.reason] || 0) + 1;
+      return acc;
+    }, {})
+  };
+  
+  // Send final results
+  self.postMessage({
+    type: 'complete',
+    results,
+    summary
+  });
+}
+
+function processSkuRow(row, feeDeRevPercent, feeMktPercent, rejects, rowIndex) {
+  // Filter 1: ExistingStock > 1
+  const stock = Number(row.ExistingStock ?? NaN);
+  if (!isFinite(stock) || stock <= 1) {
+    rejects.push({ idx: rowIndex, reason: 'stock' });
+    return null;
+  }
+  
+  // Filter 2: ManufPartNr not empty
+  const mpn = String(row.ManufPartNr ?? '').trim();
+  if (!mpn) {
+    rejects.push({ idx: rowIndex, reason: 'mpn_vuoto' });
+    return null;
+  }
+  
+  // Filter 3: Valid base price (CustBestPrice -> fallback ListPrice)
+  const cbp = parseEuroLike(row.CustBestPrice);
+  const lp = parseEuroLike(row.ListPrice);
+  
+  let baseEuro = null;
+  if (Number.isFinite(cbp) && cbp > 0) {
+    baseEuro = cbp;
+  } else if (Number.isFinite(lp) && lp > 0) {
+    baseEuro = lp;
+  }
+  
+  if (baseEuro === null) {
+    rejects.push({ idx: rowIndex, reason: 'prezzo_base' });
+    return null;
+  }
+  
+  // SKU Pipeline calculations in cents
+  const baseCents = toCents(baseEuro);
+  const shippingCents = 600; // 6.00 EUR
+  const vatRate = 0.22;
+  
+  // Step 1: base + shipping
+  let v = baseCents + shippingCents;
+  
+  // Step 2: + VAT
+  v = Math.round(v * (1 + vatRate));
+  const preFeeEuro = v / 100;
+  
+  // Step 3: + FeeDeRev (sequential)
+  const feeDeRevCents = Math.round(v * feeDeRevPercent);
+  v = v + feeDeRevCents;
+  const feeDeRevEuro = feeDeRevCents / 100;
+  
+  // Step 4: + Fee Marketplace (sequential)
+  const feeMktCents = Math.round(v * feeMktPercent);
+  v = v + feeMktCents;
+  const feeMktEuro = feeMktCents / 100;
+  
+  // Step 5: Ceiling to integer euro
+  const finalCents = Math.ceil(v / 100) * 100;
+  const finalEuro = finalCents / 100;
+  
+  // Subtotal post-fee
+  const subtotalPostFee = preFeeEuro + feeDeRevEuro + feeMktEuro;
+  
+  // ListPrice con Fee calculation
+  let listPriceConFee = '';
+  if (Number.isFinite(lp) && lp > 0) {
+    const lpBaseCents = toCents(lp);
+    let lpV = lpBaseCents + shippingCents;
+    lpV = Math.round(lpV * (1 + vatRate));
+    lpV = lpV + Math.round(lpV * feeDeRevPercent);
+    lpV = lpV + Math.round(lpV * feeMktPercent);
+    const lpFinalCents = Math.ceil(lpV / 100) * 100;
+    
+    // Validation: must be integer euro
+    if (lpFinalCents % 100 !== 0) {
+      throw new Error('SKU: ListPrice con Fee deve essere intero');
+    }
+    
+    listPriceConFee = lpFinalCents / 100;
+  }
+  
+  // Final validation: Prezzo Finale must be integer euro
+  if (finalCents % 100 !== 0) {
+    throw new Error('SKU: Prezzo Finale deve essere intero in euro');
+  }
+  
+  // Build minimal result object with exact column order
+  return {
+    Matnr: row.Matnr || '',
+    ManufPartNr: mpn,
+    EAN: sanitizeEAN(row.EAN),
+    ShortDescription: row.ShortDescription || '',
+    ExistingStock: stock,
+    CustBestPrice: Number.isFinite(cbp) ? cbp : '',
+    'Costo di Spedizione': 6.00,
+    IVA: 0.22, // Will be formatted as percentage in Excel
+    'Prezzo con spedizione e IVA': preFeeEuro,
+    FeeDeRev: feeDeRevEuro,
+    'Fee Marketplace': feeMktEuro,
+    'Subtotale post-fee': subtotalPostFee,
+    'Prezzo Finale': finalEuro,
+    ListPrice: Number.isFinite(lp) ? lp : '',
+    'ListPrice con Fee': listPriceConFee
+  };
+}
+`;
+
+    console.log('worker_created', { type: 'blob', version });
+
+    // Create blob worker
+    const blob = new Blob([workerCode], { type: 'text/javascript' });
+    const worker = new Worker(URL.createObjectURL(blob));
+    
+    // Handshake gate with 2s timeout
+    let handshakeTimer: NodeJS.Timeout;
+    let workerReadyReceived = false;
+    
+    const waitForHandshake = new Promise<void>((resolve, reject) => {
+      handshakeTimer = setTimeout(() => {
+        console.log('worker_handshake_timeout');
+        worker.terminate();
+        reject(new Error('Worker non inizializzato'));
+      }, 2000);
+
+      const messageHandler = (e: MessageEvent) => {
+        const { type, data } = e.data;
+        
+        if (type === 'worker_ready' && !workerReadyReceived) {
+          clearTimeout(handshakeTimer);
+          workerReadyReceived = true;
+          console.log('worker_ready');
+          // Remove the one-time handler and set up main handler
+          worker.removeEventListener('message', messageHandler);
+          worker.addEventListener('message', mainMessageHandler);
+          resolve();
+          return;
+        }
+      };
+
+      const mainMessageHandler = (e: MessageEvent) => {
+        handleWorkerMessage(e, worker);
+      };
+
+      worker.addEventListener('message', messageHandler);
+      
+      worker.onerror = (error) => {
+        clearTimeout(handshakeTimer);
+        console.error('Worker error:', error);
+        reject(error);
+      };
+    });
+
+    setSkuWorker(worker);
+    setIsExportingSKU(true);
+    setProgressPct(0);
+    
+    try {
+      await waitForHandshake;
+      
+      // Check if prescan is needed
+      if (!debugState.materialPreScanDone) {
+        // Start prescan
+        setProcessingState('prescanning');
+        console.log('prescan_start');
+        
+        // Send only necessary fields for optimal payload
+        const optimizedMaterialData = files.material.file.data.map(row => ({
+          Matnr: row.Matnr,
+          ManufPartNr: row.ManufPartNr,
+          EAN: row.EAN,
+          ShortDescription: row.ShortDescription,
+          ExistingStock: row.ExistingStock,
+          CustBestPrice: row.CustBestPrice,
+          ListPrice: row.ListPrice
+        }));
+        
+        worker.postMessage({
+          type: 'prescan',
+          data: { 
+            materialData: optimizedMaterialData, 
+            stockData: [], 
+            priceData: [] 
+          }
+        });
+      } else {
+        // Skip prescan, go directly to SKU processing
+        startSkuProcessing(worker);
+      }
+      
+    } catch (error) {
+      setProcessingState('error');
+      setIsExportingSKU(false);
+      toast({
+        title: "Errore Worker",
+        description: error instanceof Error ? error.message : "Worker non inizializzato",
+        variant: "destructive",
+      });
+    }
+  }, [files, feeConfig, isExportingSKU, skuWorker, toast, debugState.materialPreScanDone]);
+
+  // Handle worker messages after handshake
+  const handleWorkerMessage = useCallback((e: MessageEvent, worker: Worker) => {
+    const { type, data } = e.data;
+    
+    if (type === 'worker_error') {
+      console.error('Worker error:', data);
+      setProcessingState('error');
+      setIsExportingSKU(false);
+      toast({
+        title: "Errore Worker",
+        description: data.message || "Errore sconosciuto nel worker",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (type === 'prescan_progress') {
+      const progress = Math.round((data.done / data.total) * 100);
+      setProgressPct(progress);
+      return;
+    }
+
+    if (type === 'prescan_done') {
+      console.log('prescan_done', data.counts);
+      setDebugState(prev => ({ ...prev, materialPreScanDone: true }));
+      
+      // Now start SKU processing
+      setProcessingState('running');
+      setProgressPct(0);
+      console.log('sku_start');
+      
+      startSkuProcessing(worker);
+      return;
+    }
+
+    if (type === 'first_batch_time') {
+      setFirstBatchTime(data.time);
+      
+      // Calculate dynamic timeout: max(180s, 10 × firstBatchTime × (total/batchSize))
+      const totalRows = files.material?.file?.data?.length || 0;
+      const batchSize = 2000;
+      const dynamicTimeout = Math.max(180000, 10 * data.time * (totalRows / batchSize));
+      
+      // Clear existing timeout and set new one
+      if (skuTimeout) {
+        clearTimeout(skuTimeout);
+      }
+      
+      const timeout = setTimeout(() => {
+        console.log('sku_timeout');
+        worker.postMessage({ type: 'cancel' });
         toast({
           title: "Timeout",
-          description: "Elaborazione SKU interrotta per timeout (60s). Riprovare con un dataset più piccolo.",
+          description: "Elaborazione SKU interrotta per timeout. Riprovare con un dataset più piccolo.",
           variant: "destructive"
         });
         setIsExportingSKU(false);
         setProgressPct(0);
         setProcessingState('error');
+      }, dynamicTimeout);
+      
+      setSkuTimeout(timeout);
+      return;
+    }
+
+    if (type === 'progress') {
+      setProgressPct(data.progress);
+      return;
+    }
+
+    if (type === 'complete') {
+      console.log('sku_done', { exported: data.results.length, rejected: data.summary.rejected });
+      
+      if (skuTimeout) {
+        clearTimeout(skuTimeout);
+        setSkuTimeout(null);
       }
-    }, 60000);
-    
-    setSkuTimeout(timeout);
-  }, [files, feeConfig, isExportingSKU, skuWorker, toast, debugState.materialPreScanDone]);
-  
-  const startSkuProcessing = useCallback(() => {
-    if (!skuWorker || !files.material.file || !files.stock.file || !files.price.file) return;
-    
-    setProcessingState('running');
-    setDebugState(prev => ({ ...prev, joinStarted: true }));
-    dbg('sku_start');
-
-    try {
-      // Load source data (same as EAN pipeline)
-      const materialData = files.material.file.data;
-      const stockData = files.stock.file.data;
-      const priceData = files.price.file.data;
-
-      // Create joined dataset (reusing EAN logic)
-      const joinedData: any[] = [];
-      materialData.forEach((material: any) => {
-        const stock = stockData.find((s: any) => s.Matnr === material.Matnr);
-        const price = priceData.find((p: any) => p.Matnr === material.Matnr);
-        
-        if (stock && price) {
-          joinedData.push({
-            ...material,
-            ...stock,
-            ...price
-          });
-        }
-      });
       
-      // Send data to worker
-      skuWorker.postMessage({
-        type: 'process',
-        data: {
-          sourceRows: joinedData,
-          fees: {
-            feeDeRev: feeConfig.feeDrev,
-            feeMarketplace: feeConfig.feeMkt
-          }
-        }
-      });
-      
-    } catch (error) {
-      console.error('Errore nell\'avvio elaborazione SKU:', error);
-      toast({
-        title: "Errore",
-        description: error instanceof Error ? error.message : 'Errore sconosciuto',
-        variant: "destructive"
-      });
+      // Export to Excel
+      handleSkuComplete(data);
+      return;
+    }
+
+    if (type === 'cancelled') {
+      setProcessingState('idle');
       setIsExportingSKU(false);
       setProgressPct(0);
+      
+      if (skuTimeout) {
+        clearTimeout(skuTimeout);
+        setSkuTimeout(null);
+      }
+      
+      toast({
+        title: "Elaborazione annullata",
+        variant: "default",
+      });
+      return;
     }
-  }, [files, feeConfig, isExportingSKU, skuWorker, toast]);
+  }, [files, feeConfig, skuTimeout, toast]);
 
-  const handleCancelSkuGeneration = () => {
-    if (skuWorker) {
-      skuWorker.postMessage({ type: 'cancel' });
-    }
-  };
+  // Start SKU processing
+  const startSkuProcessing = useCallback((worker: Worker) => {
+    if (!files.material.file || !files.stock.file || !files.price.file) return;
+    
+    // Send only necessary fields for optimal payload
+    const optimizedSourceRows = files.material.file.data.map(row => ({
+      Matnr: row.Matnr,
+      ManufPartNr: row.ManufPartNr,
+      EAN: row.EAN,
+      ShortDescription: row.ShortDescription,
+      ExistingStock: row.ExistingStock,
+      CustBestPrice: row.CustBestPrice,
+      ListPrice: row.ListPrice
+    }));
+    
+    worker.postMessage({
+      type: 'process',
+      data: {
+        sourceRows: optimizedSourceRows,
+        fees: {
+          feeDeRev: feeConfig.feeDrev,
+          feeMarketplace: feeConfig.feeMkt
+        }
+      }
+    });
+  }, [files, feeConfig]);
+  
+
 
   const downloadExcel = (type: 'ean' | 'manufpartnr') => {
     if (type === 'ean') {
@@ -2045,7 +2504,7 @@ const AltersideCatalogGenerator: React.FC = () => {
                 )}
               </button>
               <button
-                onClick={onGenerateSkuCatalog}
+                onClick={createSkuBlobWorker}
                 disabled={!(debugState.materialValid && debugState.stockValid && debugState.priceValid) || isExportingSKU}
                 className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isExportingSKU ? 'is-disabled' : ''}`}
               >
@@ -2065,7 +2524,11 @@ const AltersideCatalogGenerator: React.FC = () => {
               {/* Cancel button for SKU operation */}
               {isExportingSKU && (
                 <button
-                  onClick={handleCancelSkuGeneration}
+                  onClick={() => {
+                    if (skuWorker) {
+                      skuWorker.postMessage({ type: 'cancel' });
+                    }
+                  }}
                   className="btn btn-secondary text-lg px-8 py-4"
                   title="Annulla elaborazione SKU"
                 >
