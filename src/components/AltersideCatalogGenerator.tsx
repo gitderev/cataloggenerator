@@ -253,7 +253,7 @@ const AltersideCatalogGenerator: React.FC = () => {
     }
   }, [feeConfig, rememberFees]);
 
-  const [processingState, setProcessingState] = useState<'idle' | 'validating' | 'ready' | 'running' | 'completed' | 'failed'>('idle');
+  const [processingState, setProcessingState] = useState<'idle' | 'ready' | 'prescanning' | 'running' | 'done' | 'error'>('idle');
   const [currentPipeline, setCurrentPipeline] = useState<'EAN' | 'MPN' | null>(null);
   
   // Progress states (based on rows READ, not valid rows)
@@ -319,7 +319,7 @@ const AltersideCatalogGenerator: React.FC = () => {
   const workerRef = useRef<Worker | null>(null);
 
   const isProcessing = processingState === 'running';
-  const isCompleted = processingState === 'completed';
+  const isCompleted = processingState === 'done';
   const canProcess = processingState === 'ready';
   
   // Audit function for critical debugging
@@ -377,7 +377,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         // or relaunch join with worker:false, but DON'T block infinitely
       }
       setProgressPct(100);
-      setProcessingState('completed');
+      setProcessingState('done');
       dbg('pipeline:completed', {
         pipeline: currentPipeline,
         totalPrescan: total,
@@ -1027,7 +1027,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         await runJoin(false);
         finalize();
       } catch (e) {
-        setProcessingState('failed');
+        setProcessingState('error');
         toast({ title: 'Errore elaborazione', description: 'Impossibile completare la join', variant: 'destructive' });
       }
     }
@@ -1348,30 +1348,51 @@ const AltersideCatalogGenerator: React.FC = () => {
   // SKU Worker state
   const [skuWorker, setSkuWorker] = useState<Worker | null>(null);
   const [skuTimeout, setSkuTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [workerHandshakeTimeout, setWorkerHandshakeTimeout] = useState<NodeJS.Timeout | null>(null);
 
-  // Initialize SKU worker
+  // Initialize SKU worker with handshake timeout
   useEffect(() => {
     const worker = new Worker('/alterside-sku-worker.js');
+    
+    // Set 1s timeout for worker handshake
+    const handshakeTimeout = setTimeout(() => {
+      console.warn('Worker handshake timeout, recreating worker');
+      worker.terminate();
+      const newWorker = new Worker('/alterside-sku-worker.js');
+      setSkuWorker(newWorker);
+    }, 1000);
+    
+    setWorkerHandshakeTimeout(handshakeTimeout);
     
     worker.onmessage = (e) => {
       const { type, ...data } = e.data;
       
-      switch (type) {
-        case 'progress':
-          setProgressPct(data.progress);
-          break;
-          
-        case 'complete':
-          handleSkuComplete(data);
-          break;
-          
-        case 'error':
-          handleSkuError(data.error);
-          break;
-          
-        case 'cancelled':
-          handleSkuCancelled();
-          break;
+      if (type === 'worker_ready') {
+        if (workerHandshakeTimeout) {
+          clearTimeout(workerHandshakeTimeout);
+          setWorkerHandshakeTimeout(null);
+        }
+        dbg('worker_ready');
+      } else if (type === 'prescan_progress') {
+        setProgressPct(Math.round(data.progress));
+      } else if (type === 'prescan_done') {
+        dbg('prescan_done { n: ' + data.counts + ' }');
+        setDebugState(prev => ({ ...prev, materialPreScanDone: true }));
+        setProcessingState('ready');
+        // Now start SKU processing
+        startSkuProcessing();
+      } else if (type === 'progress') {
+        setProgressPct(Math.round((data.recordsProcessed / data.totalRecords) * 100));
+      } else if (type === 'complete') {
+        dbg('sku_done { exported: ' + data.results.length + ', rejected: ' + data.summary.rejected + ' }');
+        setProcessingState('done');
+        handleSkuComplete(data);
+      } else if (type === 'error') {
+        setProcessingState('error');
+        handleSkuError(data.error);
+      } else if (type === 'cancelled') {
+        setProcessingState('idle');
+        handleSkuCancelled();
       }
     };
     
@@ -1513,7 +1534,7 @@ const AltersideCatalogGenerator: React.FC = () => {
     setProgressPct(0);
   };
 
-  // SKU catalog generation function - now using Web Worker
+  // SKU catalog generation function - now using state machine
   const onGenerateSkuCatalog = useCallback(async () => {
     if (isExportingSKU) {
       toast({
@@ -1563,6 +1584,26 @@ const AltersideCatalogGenerator: React.FC = () => {
 
     setIsExportingSKU(true);
     setProgressPct(0);
+    dbg('click_sku');
+    
+    // State machine: idle → ready → prescanning? → running → done|error
+    if (!debugState.materialPreScanDone) {
+      // Need prescan first
+      setProcessingState('prescanning');
+      dbg('prescan_start');
+      
+      skuWorker.postMessage({
+        type: 'prescan',
+        data: {
+          materialData: files.material.file.data,
+          stockData: files.stock.file.data,
+          priceData: files.price.file.data
+        }
+      });
+    } else {
+      // Skip prescan, go directly to SKU processing
+      startSkuProcessing();
+    }
     
     // Set 60-second watchdog timeout
     const timeout = setTimeout(() => {
@@ -1575,11 +1616,20 @@ const AltersideCatalogGenerator: React.FC = () => {
         });
         setIsExportingSKU(false);
         setProgressPct(0);
+        setProcessingState('error');
       }
     }, 60000);
     
     setSkuTimeout(timeout);
+  }, [files, feeConfig, isExportingSKU, skuWorker, toast, debugState.materialPreScanDone]);
+  
+  const startSkuProcessing = useCallback(() => {
+    if (!skuWorker || !files.material.file || !files.stock.file || !files.price.file) return;
     
+    setProcessingState('running');
+    setDebugState(prev => ({ ...prev, joinStarted: true }));
+    dbg('sku_start');
+
     try {
       // Load source data (same as EAN pipeline)
       const materialData = files.material.file.data;
@@ -1614,10 +1664,6 @@ const AltersideCatalogGenerator: React.FC = () => {
       });
       
     } catch (error) {
-      if (timeout) {
-        clearTimeout(timeout);
-        setSkuTimeout(null);
-      }
       console.error('Errore nell\'avvio elaborazione SKU:', error);
       toast({
         title: "Errore",
@@ -2000,13 +2046,13 @@ const AltersideCatalogGenerator: React.FC = () => {
               </button>
               <button
                 onClick={onGenerateSkuCatalog}
-                disabled={!canProcess || isExportingSKU}
+                disabled={!(debugState.materialValid && debugState.stockValid && debugState.priceValid) || isExportingSKU}
                 className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isExportingSKU ? 'is-disabled' : ''}`}
               >
                 {isExportingSKU ? (
                   <>
                     <Activity className="mr-3 h-5 w-5 animate-spin" />
-                    Elaborazione SKU...
+                    {processingState === 'prescanning' ? 'Indicizzazione prodotti...' : 'Elaborazione SKU...'}
                   </>
                 ) : (
                   <>

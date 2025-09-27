@@ -3,6 +3,11 @@
 
 let isProcessing = false;
 let shouldCancel = false;
+let indexByMPN = new Map();
+let indexByEAN = new Map();
+
+// Send ready signal
+self.postMessage({ type: 'worker_ready' });
 
 self.onmessage = function(e) {
   const { type, data } = e.data;
@@ -10,6 +15,21 @@ self.onmessage = function(e) {
   if (type === 'cancel') {
     shouldCancel = true;
     return;
+  }
+  
+  if (type === 'prescan') {
+    try {
+      shouldCancel = false;
+      isProcessing = true;
+      performPreScan(data);
+    } catch (error) {
+      self.postMessage({
+        type: 'error',
+        error: error instanceof Error ? error.message : 'Errore durante pre-scan'
+      });
+    } finally {
+      isProcessing = false;
+    }
   }
   
   if (type === 'process') {
@@ -27,6 +47,93 @@ self.onmessage = function(e) {
     }
   }
 };
+
+// Pre-scan function to build indices
+async function performPreScan({ materialData, stockData, priceData }) {
+  const startTime = Date.now();
+  const BATCH_SIZE = 2000;
+  
+  let processed = 0;
+  const totalData = materialData.length + stockData.length + priceData.length;
+  
+  self.postMessage({
+    type: 'prescan_progress',
+    progress: 0
+  });
+  
+  // Build ManufPartNr index
+  indexByMPN.clear();
+  for (let i = 0; i < materialData.length; i += BATCH_SIZE) {
+    if (shouldCancel) {
+      self.postMessage({ type: 'cancelled' });
+      return;
+    }
+    
+    const batch = materialData.slice(i, Math.min(i + BATCH_SIZE, materialData.length));
+    
+    for (const record of batch) {
+      const mpn = String(record.ManufPartNr ?? '').trim();
+      if (mpn) {
+        indexByMPN.set(mpn, record);
+      }
+      processed++;
+    }
+    
+    const progress = Math.round((processed / totalData) * 100);
+    self.postMessage({
+      type: 'prescan_progress',
+      progress: Math.min(progress, 33)
+    });
+    
+    // Yield to main thread
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  
+  // Build EAN index
+  indexByEAN.clear();
+  for (let i = 0; i < materialData.length; i += BATCH_SIZE) {
+    if (shouldCancel) {
+      self.postMessage({ type: 'cancelled' });
+      return;
+    }
+    
+    const batch = materialData.slice(i, Math.min(i + BATCH_SIZE, materialData.length));
+    
+    for (const record of batch) {
+      const ean = String(record.EAN ?? '').trim();
+      if (ean) {
+        indexByEAN.set(ean, record);
+      }
+      processed++;
+    }
+    
+    const progress = Math.round((processed / totalData) * 100);
+    self.postMessage({
+      type: 'prescan_progress',
+      progress: Math.min(progress, 66)
+    });
+    
+    // Yield to main thread
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  
+  // Index stock and price data
+  for (let i = 0; i < stockData.length + priceData.length; i++) {
+    processed++;
+  }
+  
+  const processingTime = Date.now() - startTime;
+  
+  self.postMessage({
+    type: 'prescan_done',
+    counts: {
+      mpnRecords: indexByMPN.size,
+      eanRecords: indexByEAN.size,
+      totalMaterial: materialData.length,
+      processingTimeMs: processingTime
+    }
+  });
+}
 
 // Utility functions aligned with EAN architecture
 function parseEuroLike(input) {
