@@ -67,10 +67,33 @@ interface FileData {
   isValid?: boolean;
 }
 
+interface EANPrefillCounters {
+  already_populated: number;
+  filled_now: number;
+  skipped_due_to_conflict: number;
+  duplicate_mpn_rows: number;
+  mpn_not_in_material: number;
+  empty_ean_rows: number;
+  missing_mapping_in_new_file: number;
+  errori_formali: number;
+}
+
+interface EANPrefillReports {
+  updated: Array<{ ManufPartNr: string; EAN_old: string; EAN_new: string }>;
+  already_populated: Array<{ ManufPartNr: string; EAN_existing: string }>;
+  skipped_due_to_conflict: Array<{ ManufPartNr: string; EAN_material: string; EAN_mapping_first: string }>;
+  duplicate_mpn_rows: Array<{ mpn: string; ean_seen_first: string; ean_conflicting: string; row_index: number }>;
+  mpn_not_in_material: Array<{ mpn: string; ean: string; row_index: number }>;
+  empty_ean_rows: Array<{ mpn: string; row_index: number }>;
+  missing_mapping_in_new_file: Array<{ ManufPartNr: string }>;
+  errori_formali: Array<{ raw_line: string; reason: string; row_index: number }>;
+}
+
 interface FileUploadState {
   material: { file: FileData | null; status: 'empty' | 'valid' | 'error' | 'warning'; error?: string; warning?: string; diagnostics?: any };
   stock: { file: FileData | null; status: 'empty' | 'valid' | 'error' | 'warning'; error?: string; warning?: string; diagnostics?: any };
   price: { file: FileData | null; status: 'empty' | 'valid' | 'error' | 'warning'; error?: string; warning?: string; diagnostics?: any };
+  eanMapping: { file: File | null; status: 'empty' | 'ready' | 'processing' | 'completed' | 'error'; error?: string };
 }
 
 interface ProcessedRecord {
@@ -267,8 +290,16 @@ const AltersideCatalogGenerator: React.FC = () => {
   const [files, setFiles] = useState<FileUploadState>({
     material: { file: null, status: 'empty' },
     stock: { file: null, status: 'empty' },
-    price: { file: null, status: 'empty' }
+    price: { file: null, status: 'empty' },
+    eanMapping: { file: null, status: 'empty' }
   });
+
+  // EAN Prefill state
+  const [eanPrefillCompleted, setEanPrefillCompleted] = useState(false);
+  const [eanPrefillCounters, setEanPrefillCounters] = useState<EANPrefillCounters | null>(null);
+  const [eanPrefillReports, setEanPrefillReports] = useState<EANPrefillReports | null>(null);
+  const [isProcessingPrefill, setIsProcessingPrefill] = useState(false);
+  const eanPrefillWorkerRef = useRef<Worker | null>(null);
 
   // Fee configuration
   const [feeConfig, setFeeConfig] = useState<FeeConfig>(loadFees());
@@ -367,6 +398,20 @@ const AltersideCatalogGenerator: React.FC = () => {
   useEffect(() => {
     (window as any).dbg = dbg;
   }, [dbg]);
+
+  // Cleanup workers on unmount
+  useEffect(() => {
+    return () => {
+      if (workerRef.current) {
+        workerRef.current.terminate();
+        workerRef.current = null;
+      }
+      if (eanPrefillWorkerRef.current) {
+        eanPrefillWorkerRef.current.terminate();
+        eanPrefillWorkerRef.current = null;
+      }
+    };
+  }, []);
 
   // Consistency check functions with ±1 tolerance
   const sumForPipeline = useCallback(() => {
@@ -525,9 +570,11 @@ const AltersideCatalogGenerator: React.FC = () => {
       
       // Check if all files are loaded with valid required headers (warnings don't block)
       const allRequiredHeadersValid = Object.entries(newFiles).every(([fileType, fileState]) => {
+        if (fileType === 'eanMapping') return true; // Skip eanMapping check (optional)
         if (!fileState.file) return false;
+        const fileData = fileState.file as FileData;
         const requiredHeaders = REQUIRED_HEADERS[fileType as keyof typeof REQUIRED_HEADERS];
-        const validation = validateHeaders(fileState.file.headers, requiredHeaders);
+        const validation = validateHeaders(fileData.headers, requiredHeaders);
         return validation.valid; // Only check required headers
       });
       
@@ -582,9 +629,16 @@ const AltersideCatalogGenerator: React.FC = () => {
       [type]: {
         file: null,
         status: 'empty',
-        diagnostics: null
+        diagnostics: type === 'eanMapping' ? undefined : null
       }
     }));
+
+    // Reset EAN prefill if removing mapping file
+    if (type === 'eanMapping') {
+      setEanPrefillCompleted(false);
+      setEanPrefillCounters(null);
+      setEanPrefillReports(null);
+    }
 
     // Reset processing state if no files remain
     const remainingFiles = Object.entries(files).filter(([key, _]) => key !== type);
@@ -1570,6 +1624,420 @@ const AltersideCatalogGenerator: React.FC = () => {
     exportDiscardedRowsCSV(discardedRows, `righe_scartate_EAN_${new Date().toISOString().split('T')[0]}`);
   };
 
+  const handleEANMappingUpload = (file: File) => {
+    // Validate file extension
+    const validExtensions = ['.csv', '.txt'];
+    const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+    
+    if (!validExtensions.includes(fileExt)) {
+      toast({
+        title: "Formato file non valido",
+        description: "Accettati solo file .csv o .txt",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    setFiles(prev => ({
+      ...prev,
+      eanMapping: { file, status: 'ready' }
+    }));
+    
+    toast({
+      title: "File caricato",
+      description: `${file.name} pronto per l'elaborazione`
+    });
+  };
+
+  const processEANPrefill = async () => {
+    if (!files.eanMapping.file || !files.material.file) {
+      toast({
+        title: "File mancanti",
+        description: "Carica sia il file Material che il file di mapping",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    setIsProcessingPrefill(true);
+    setFiles(prev => ({
+      ...prev,
+      eanMapping: { ...prev.eanMapping, status: 'processing' }
+    }));
+    
+    try {
+      // Read mapping file as text
+      const mappingText = await files.eanMapping.file.text();
+      
+      // Validate header
+      const lines = mappingText.split('\n');
+      const header = lines[0]?.trim();
+      
+      if (header !== 'mpn;ean') {
+        throw new Error('Header richiesto: mpn;ean');
+      }
+      
+      const materialData = files.material.file.data;
+      
+      // Use worker for large files
+      if (lines.length > 100000 || materialData.length > 100000) {
+        // Process with Web Worker
+        return new Promise<void>((resolve, reject) => {
+          const worker = new Worker('/ean-prefill-worker.js');
+          eanPrefillWorkerRef.current = worker;
+          
+          worker.onmessage = (e) => {
+            if (e.data.error) {
+              reject(new Error(e.data.message));
+              return;
+            }
+            
+            if (e.data.success) {
+              // Update material file with filled EANs
+              setFiles(prev => ({
+                ...prev,
+                material: {
+                  ...prev.material,
+                  file: prev.material.file ? {
+                    ...prev.material.file,
+                    data: e.data.updatedMaterial
+                  } : null
+                },
+                eanMapping: { ...prev.eanMapping, status: 'completed' }
+              }));
+              
+              setEanPrefillCounters(e.data.counters);
+              setEanPrefillReports(e.data.reports);
+              setEanPrefillCompleted(true);
+              setIsProcessingPrefill(false);
+              
+              toast({
+                title: "Pre-fill completato",
+                description: `${e.data.counters.filled_now} EAN aggiunti`
+              });
+              
+              worker.terminate();
+              eanPrefillWorkerRef.current = null;
+              resolve();
+            }
+          };
+          
+          worker.onerror = (error) => {
+            reject(error);
+          };
+          
+          worker.postMessage({
+            mappingText,
+            materialData,
+            counters: {}
+          });
+        }).catch((error) => {
+          setIsProcessingPrefill(false);
+          setFiles(prev => ({
+            ...prev,
+            eanMapping: { ...prev.eanMapping, status: 'error', error: error.message }
+          }));
+          toast({
+            title: "Errore elaborazione",
+            description: error.message,
+            variant: "destructive"
+          });
+        });
+      }
+      
+      // Process without worker (synchronous for small files)
+      const mappingMap = new Map<string, string>();
+      const reports: EANPrefillReports = {
+        duplicate_mpn_rows: [],
+        empty_ean_rows: [],
+        errori_formali: [],
+        updated: [],
+        already_populated: [],
+        skipped_due_to_conflict: [],
+        mpn_not_in_material: [],
+        missing_mapping_in_new_file: []
+      };
+      
+      const counters: EANPrefillCounters = {
+        already_populated: 0,
+        filled_now: 0,
+        skipped_due_to_conflict: 0,
+        duplicate_mpn_rows: 0,
+        mpn_not_in_material: 0,
+        empty_ean_rows: 0,
+        missing_mapping_in_new_file: 0,
+        errori_formali: 0
+      };
+      
+      // Parse mapping file
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i]?.trim();
+        if (!line) continue;
+        
+        const parts = line.split(';');
+        if (parts.length < 2) {
+          counters.errori_formali++;
+          reports.errori_formali.push({
+            raw_line: line,
+            reason: 'formato_errato',
+            row_index: i + 1
+          });
+          continue;
+        }
+        
+        const mpn = parts[0]?.trim();
+        const ean = parts[1]?.trim();
+        
+        if (!ean) {
+          counters.empty_ean_rows++;
+          reports.empty_ean_rows.push({
+            mpn: mpn,
+            row_index: i + 1
+          });
+          continue;
+        }
+        
+        if (mappingMap.has(mpn)) {
+          const existing = mappingMap.get(mpn)!;
+          if (existing !== ean) {
+            counters.duplicate_mpn_rows++;
+            reports.duplicate_mpn_rows.push({
+              mpn: mpn,
+              ean_seen_first: existing,
+              ean_conflicting: ean,
+              row_index: i + 1
+            });
+          }
+        } else {
+          mappingMap.set(mpn, ean);
+        }
+      }
+      
+      // Create a set of all MPNs in material
+      const materialMPNs = new Set(
+        materialData.map((row: any) => row.ManufPartNr?.toString().trim()).filter(Boolean)
+      );
+      
+      // Check for MPNs in mapping that don't exist in material
+      for (const [mpn, ean] of mappingMap.entries()) {
+        if (!materialMPNs.has(mpn)) {
+          counters.mpn_not_in_material++;
+          reports.mpn_not_in_material.push({
+            mpn: mpn,
+            ean: ean,
+            row_index: 0
+          });
+        }
+      }
+      
+      // Process material rows
+      const updatedMaterial = materialData.map((row: any) => {
+        const newRow = { ...row };
+        const mpn = row.ManufPartNr?.toString().trim();
+        const currentEAN = row.EAN?.toString().trim();
+        
+        if (currentEAN) {
+          // EAN already populated
+          counters.already_populated++;
+          reports.already_populated.push({
+            ManufPartNr: mpn,
+            EAN_existing: currentEAN
+          });
+          
+          // Check if there's also a mapping for this MPN
+          if (mpn && mappingMap.has(mpn)) {
+            const mappingEAN = mappingMap.get(mpn)!;
+            counters.skipped_due_to_conflict++;
+            reports.skipped_due_to_conflict.push({
+              ManufPartNr: mpn,
+              EAN_material: currentEAN,
+              EAN_mapping_first: mappingEAN
+            });
+          }
+        } else if (mpn && mappingMap.has(mpn)) {
+          // EAN empty and mapping exists - fill it
+          const mappingEAN = mappingMap.get(mpn)!;
+          newRow.EAN = mappingEAN;
+          counters.filled_now++;
+          reports.updated.push({
+            ManufPartNr: mpn,
+            EAN_old: currentEAN || '',
+            EAN_new: mappingEAN
+          });
+        } else {
+          // EAN empty and no mapping found
+          counters.missing_mapping_in_new_file++;
+          reports.missing_mapping_in_new_file.push({
+            ManufPartNr: mpn || ''
+          });
+        }
+        
+        return newRow;
+      });
+      
+      // Update material file with filled EANs
+      setFiles(prev => ({
+        ...prev,
+        material: {
+          ...prev.material,
+          file: prev.material.file ? {
+            ...prev.material.file,
+            data: updatedMaterial
+          } : null
+        },
+        eanMapping: { ...prev.eanMapping, status: 'completed' }
+      }));
+      
+      setEanPrefillCounters(counters);
+      setEanPrefillReports(reports);
+      setEanPrefillCompleted(true);
+      setIsProcessingPrefill(false);
+      
+      toast({
+        title: "Pre-fill completato",
+        description: `${counters.filled_now} EAN aggiunti`
+      });
+      
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Errore sconosciuto';
+      setIsProcessingPrefill(false);
+      setFiles(prev => ({
+        ...prev,
+        eanMapping: { ...prev.eanMapping, status: 'error', error: errorMsg }
+      }));
+      toast({
+        title: "Errore elaborazione",
+        description: errorMsg,
+        variant: "destructive"
+      });
+    }
+  };
+
+  const downloadEANPrefillReport = () => {
+    if (!eanPrefillReports) {
+      toast({
+        title: "Nessun report disponibile",
+        description: "Elabora prima le associazioni EAN",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    try {
+      const wb = XLSX.utils.book_new();
+      
+      // Helper to force columns as text
+      const forceColumnsAsText = (ws: XLSX.WorkSheet, columnNames: string[]) => {
+        if (!ws['!ref']) return;
+        const range = XLSX.utils.decode_range(ws['!ref']);
+        
+        for (const colName of columnNames) {
+          let colIndex = -1;
+          // Find column index
+          for (let C = range.s.c; C <= range.e.c; C++) {
+            const addr = XLSX.utils.encode_cell({ r: 0, c: C });
+            const cell = ws[addr];
+            const name = (cell?.v ?? '').toString().trim();
+            if (name === colName) {
+              colIndex = C;
+              break;
+            }
+          }
+          
+          if (colIndex < 0) continue;
+          
+          // Force cells as text
+          for (let R = 1; R <= range.e.r; R++) {
+            const addr = XLSX.utils.encode_cell({ r: R, c: colIndex });
+            const cell = ws[addr];
+            if (!cell) continue;
+            cell.v = (cell.v ?? '').toString();
+            cell.t = 's';
+            cell.z = '@';
+            ws[addr] = cell;
+          }
+        }
+      };
+      
+      // Sheet 1: Updated
+      if (eanPrefillReports.updated.length > 0) {
+        const ws1 = XLSX.utils.json_to_sheet(eanPrefillReports.updated);
+        XLSX.utils.book_append_sheet(wb, ws1, "updated");
+        forceColumnsAsText(ws1, ['EAN_old', 'EAN_new']);
+      }
+      
+      // Sheet 2: Already Populated
+      if (eanPrefillReports.already_populated.length > 0) {
+        const ws2 = XLSX.utils.json_to_sheet(eanPrefillReports.already_populated);
+        XLSX.utils.book_append_sheet(wb, ws2, "already_populated");
+        forceColumnsAsText(ws2, ['EAN_existing']);
+      }
+      
+      // Sheet 3: Skipped Due to Conflict
+      if (eanPrefillReports.skipped_due_to_conflict.length > 0) {
+        const ws3 = XLSX.utils.json_to_sheet(eanPrefillReports.skipped_due_to_conflict);
+        XLSX.utils.book_append_sheet(wb, ws3, "skipped_due_to_conflict");
+        forceColumnsAsText(ws3, ['EAN_material', 'EAN_mapping_first']);
+      }
+      
+      // Sheet 4: Duplicate MPN Rows
+      if (eanPrefillReports.duplicate_mpn_rows.length > 0) {
+        const ws4 = XLSX.utils.json_to_sheet(eanPrefillReports.duplicate_mpn_rows);
+        XLSX.utils.book_append_sheet(wb, ws4, "duplicate_mpn_rows");
+        forceColumnsAsText(ws4, ['ean_seen_first', 'ean_conflicting']);
+      }
+      
+      // Sheet 5: MPN Not in Material
+      if (eanPrefillReports.mpn_not_in_material.length > 0) {
+        const ws5 = XLSX.utils.json_to_sheet(eanPrefillReports.mpn_not_in_material);
+        XLSX.utils.book_append_sheet(wb, ws5, "mpn_not_in_material");
+        forceColumnsAsText(ws5, ['ean']);
+      }
+      
+      // Sheet 6: Empty EAN Rows
+      if (eanPrefillReports.empty_ean_rows.length > 0) {
+        const ws6 = XLSX.utils.json_to_sheet(eanPrefillReports.empty_ean_rows);
+        XLSX.utils.book_append_sheet(wb, ws6, "empty_ean_rows");
+      }
+      
+      // Sheet 7: Missing Mapping
+      if (eanPrefillReports.missing_mapping_in_new_file.length > 0) {
+        const ws7 = XLSX.utils.json_to_sheet(eanPrefillReports.missing_mapping_in_new_file);
+        XLSX.utils.book_append_sheet(wb, ws7, "missing_mapping_in_new_file");
+      }
+      
+      // Sheet 8: Errori Formali
+      if (eanPrefillReports.errori_formali.length > 0) {
+        const ws8 = XLSX.utils.json_to_sheet(eanPrefillReports.errori_formali);
+        XLSX.utils.book_append_sheet(wb, ws8, "errori_formali");
+      }
+      
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'ean_prefill_report.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      toast({
+        title: "Report scaricato",
+        description: "File ean_prefill_report.xlsx scaricato con successo"
+      });
+      
+    } catch (error) {
+      toast({
+        title: "Errore generazione report",
+        description: error instanceof Error ? error.message : 'Errore sconosciuto',
+        variant: "destructive"
+      });
+    }
+  };
+
   const downloadLog = (type: 'ean' | 'manufpartnr') => {
     if (currentLogEntries.length === 0 && !currentStats) return;
     
@@ -1677,9 +2145,9 @@ const AltersideCatalogGenerator: React.FC = () => {
               <div className="flex items-center gap-3">
                 <FileText className="h-6 w-6 icon-dark" />
                 <div>
-                  <p className="font-medium">{fileState.file.name}</p>
+                  <p className="font-medium">{(fileState.file as FileData).name}</p>
                   <p className="text-sm text-muted">
-                    {fileState.file.data.length} righe
+                    {(fileState.file as FileData).data.length} righe
                   </p>
                 </div>
               </div>
@@ -1704,14 +2172,14 @@ const AltersideCatalogGenerator: React.FC = () => {
             </div>
           )}
 
-          {fileState.file && (
+          {fileState.file && 'data' in fileState.file && (
             <div className="mt-4 p-3 rounded-lg border-strong bg-gray-50">
               <h4 className="text-sm font-medium mb-2">Diagnostica</h4>
               <div className="text-xs text-muted">
-                <div><strong>Header rilevati:</strong> {fileState.file.headers.join(', ')}</div>
-                {fileState.file.data.length > 0 && (
+                <div><strong>Header rilevati:</strong> {(fileState.file as FileData).headers.join(', ')}</div>
+                {(fileState.file as FileData).data.length > 0 && (
                   <div className="mt-1">
-                    <strong>Prima riga di dati:</strong> {Object.values(fileState.file.data[0]).slice(0, 3).join(', ')}...
+                    <strong>Prima riga di dati:</strong> {Object.values((fileState.file as FileData).data[0]).slice(0, 3).join(', ')}...
                   </div>
                 )}
               </div>
@@ -1753,6 +2221,162 @@ const AltersideCatalogGenerator: React.FC = () => {
                   <li>• <strong>Prezzi:</strong> Base + spedizione (€6), IVA 22%, fee sequenziali configurabili</li>
                   <li>• <strong>Prezzo finale EAN:</strong> ending ,99; <strong>ManufPartNr:</strong> arrotondamento intero superiore</li>
                 </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* EAN Pre-fill Section (Optional) */}
+        <div className="card border-strong" style={{ background: '#f8fafc' }}>
+          <div className="card-body">
+            <div className="flex items-start gap-4 mb-4">
+              <Info className="h-6 w-6 icon-dark mt-1 flex-shrink-0" />
+              <div className="flex-1">
+                <h3 className="card-title mb-2">Associare EAN da file SKU↔EAN (opzionale)</h3>
+                <p className="text-sm text-muted mb-3">
+                  Delimitatore <strong>;</strong> — Header richiesto: <strong>mpn;ean</strong> — Elaborato prima degli altri file
+                </p>
+                
+                {!files.eanMapping.file ? (
+                  <div className="mt-4">
+                    <div className="dropzone text-center p-6">
+                      <Upload className="mx-auto h-10 w-10 icon-dark mb-3" />
+                      <input
+                        type="file"
+                        accept=".txt,.csv"
+                        onChange={(e) => {
+                          const selectedFile = e.target.files?.[0];
+                          if (selectedFile) {
+                            handleEANMappingUpload(selectedFile);
+                          }
+                        }}
+                        className="hidden"
+                        id="file-ean-mapping"
+                      />
+                      <label
+                        htmlFor="file-ean-mapping"
+                        className="btn btn-primary cursor-pointer px-6 py-3"
+                      >
+                        Carica File Mapping
+                      </label>
+                      <p className="text-muted text-xs mt-3">
+                        File .csv o .txt con delimitatore ; e encoding UTF-8
+                      </p>
+                    </div>
+                    {!eanPrefillCompleted && (
+                      <div className="mt-3 p-3 rounded-lg" style={{ background: '#e3f2fd', color: '#1565c0' }}>
+                        <p className="text-sm">
+                          <strong>Nessun file di associazione caricato:</strong> salto pre-fill EAN
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-4">
+                    <div className="flex items-center justify-between p-4 bg-white rounded-lg border-strong mb-3">
+                      <div className="flex items-center gap-3">
+                        <FileText className="h-6 w-6 icon-dark" />
+                        <div>
+                          <p className="font-medium">{files.eanMapping.file.name}</p>
+                          <p className="text-sm text-muted">
+                            {files.eanMapping.status === 'ready' && 'Pronto per elaborazione'}
+                            {files.eanMapping.status === 'processing' && 'Elaborazione in corso...'}
+                            {files.eanMapping.status === 'completed' && 'Elaborazione completata'}
+                            {files.eanMapping.status === 'error' && 'Errore elaborazione'}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => removeFile('eanMapping')}
+                        className="btn btn-secondary text-sm px-3 py-2"
+                        disabled={isProcessingPrefill}
+                      >
+                        Rimuovi
+                      </button>
+                    </div>
+                    
+                    {files.eanMapping.status === 'error' && files.eanMapping.error && (
+                      <div className="p-3 rounded-lg border-strong mb-3" style={{ background: 'var(--error-bg)', color: 'var(--error-fg)' }}>
+                        <p className="text-sm font-medium">{files.eanMapping.error}</p>
+                      </div>
+                    )}
+                    
+                    <div className="flex gap-3">
+                      <button
+                        onClick={processEANPrefill}
+                        disabled={!files.material.file || files.eanMapping.status === 'processing' || eanPrefillCompleted}
+                        className={`btn btn-primary px-6 py-2 ${(!files.material.file || files.eanMapping.status === 'processing' || eanPrefillCompleted) ? 'is-disabled' : ''}`}
+                      >
+                        {isProcessingPrefill ? (
+                          <>
+                            <Activity className="mr-2 h-4 w-4 animate-spin" />
+                            Elaborazione...
+                          </>
+                        ) : eanPrefillCompleted ? (
+                          <>
+                            <CheckCircle className="mr-2 h-4 w-4" />
+                            Completato
+                          </>
+                        ) : (
+                          'Elabora associazioni'
+                        )}
+                      </button>
+                      
+                      {eanPrefillCompleted && (
+                        <button
+                          onClick={downloadEANPrefillReport}
+                          className="btn btn-secondary px-6 py-2"
+                        >
+                          <Download className="mr-2 h-4 w-4" />
+                          Scarica report
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+                
+                {eanPrefillCompleted && eanPrefillCounters && (
+                  <div className="mt-4 p-4 rounded-lg border-strong" style={{ background: '#e8f5e9' }}>
+                    <h4 className="text-sm font-semibold mb-3" style={{ color: '#2e7d32' }}>
+                      <CheckCircle className="inline h-4 w-4 mr-1" />
+                      EAN pre-fill completato
+                    </h4>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                      <div className="p-2 bg-white rounded">
+                        <div className="font-bold text-lg text-green-600">{eanPrefillCounters.filled_now}</div>
+                        <div className="text-muted">EAN riempiti ora</div>
+                      </div>
+                      <div className="p-2 bg-white rounded">
+                        <div className="font-bold text-lg">{eanPrefillCounters.already_populated}</div>
+                        <div className="text-muted">Già popolati</div>
+                      </div>
+                      <div className="p-2 bg-white rounded">
+                        <div className="font-bold text-lg text-orange-600">{eanPrefillCounters.skipped_due_to_conflict}</div>
+                        <div className="text-muted">Conflitti</div>
+                      </div>
+                      <div className="p-2 bg-white rounded">
+                        <div className="font-bold text-lg text-blue-600">{eanPrefillCounters.missing_mapping_in_new_file}</div>
+                        <div className="text-muted">Senza mapping</div>
+                      </div>
+                      <div className="p-2 bg-white rounded">
+                        <div className="font-bold text-lg text-red-600">{eanPrefillCounters.duplicate_mpn_rows}</div>
+                        <div className="text-muted">MPN duplicati</div>
+                      </div>
+                      <div className="p-2 bg-white rounded">
+                        <div className="font-bold text-lg text-red-600">{eanPrefillCounters.mpn_not_in_material}</div>
+                        <div className="text-muted">MPN non in Material</div>
+                      </div>
+                      <div className="p-2 bg-white rounded">
+                        <div className="font-bold text-lg text-yellow-600">{eanPrefillCounters.empty_ean_rows}</div>
+                        <div className="text-muted">EAN vuoti nel mapping</div>
+                      </div>
+                      <div className="p-2 bg-white rounded">
+                        <div className="font-bold text-lg text-gray-600">{eanPrefillCounters.errori_formali}</div>
+                        <div className="text-muted">Errori formali</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
