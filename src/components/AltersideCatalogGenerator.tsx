@@ -262,57 +262,90 @@ function computeFinalPrice({
     }
   }
   
+  // Helper function for robust numeric normalization
+  const normalizeNumeric = (value: any): number | null => {
+    if (value === null || value === undefined || value === '') return null;
+    
+    let str = String(value).trim();
+    // Remove € symbol and internal spaces
+    str = str.replace(/€/g, '').replace(/\s/g, '');
+    // Replace comma with dot for decimal separator
+    str = str.replace(',', '.');
+    
+    const parsed = parseFloat(str);
+    return isNaN(parsed) ? null : parsed;
+  };
+
   // Calculate ListPrice con Fee - SEPARATE pipeline, independent from main calculation
   let listPriceConFee: number | string = '';
   
-  // Check if new rule should be activated
-  const shouldUseAlternativeRule = !hasListPrice || 
-                                     (hasListPrice && ListPrice! <= 0) || 
-                                     (hasListPrice && hasBest && ListPrice! < CustBestPrice!);
+  // Normalize all required fields BEFORE any comparison or calculation
+  const normCustBestPrice = normalizeNumeric(CustBestPrice);
+  const normShipping = normalizeNumeric(shipping);
+  const normIvaPerc = 22; // IVA is always 22% in this system
+  const normFeeDrev = normalizeNumeric(feeDrev);
+  const normFeeMkt = normalizeNumeric(feeMkt);
+  const normPrezzoFinale = normalizeNumeric(prezzoFinaleEAN);
+  const normListPrice = normalizeNumeric(ListPrice);
   
-  if (shouldUseAlternativeRule && hasBest) {
-    // NEW RULE: ListPrice is absent, 0, non-numeric, or < CustBestPrice
+  // Check if all required inputs are valid for the alternative rule
+  const hasValidInputsForAltRule = normCustBestPrice !== null && 
+                                     normShipping !== null && 
+                                     normIvaPerc !== null && 
+                                     normFeeDrev !== null && 
+                                     normFeeMkt !== null && 
+                                     normPrezzoFinale !== null;
+  
+  // Check if alternative rule should be activated
+  const shouldUseAlternativeRule = normListPrice === null || 
+                                     normListPrice === 0 || 
+                                     (normCustBestPrice !== null && normListPrice < normCustBestPrice);
+  
+  if (shouldUseAlternativeRule && hasValidInputsForAltRule) {
+    // OVERRIDE RULE: ListPrice is absent, 0, non-numeric, or < CustBestPrice
     // Use CustBestPrice × 1.25 as base
-    const baseSubstitutive = CustBestPrice! * 1.25;
-    const N_candidato = ((baseSubstitutive + shipping) * ivaMultiplier) * feeDrev * feeMkt;
-    const N_candidato_ceiled = Math.ceil(N_candidato);
+    const base = normCustBestPrice! * 1.25;
+    const ivaMultiplier = 1 + (normIvaPerc! / 100);
+    const valore_candidato = ((base + normShipping!) * ivaMultiplier) * normFeeDrev! * normFeeMkt!;
+    const candidato_ceil = Math.ceil(valore_candidato);
     
     // Calculate minimum constraint: 25% above Prezzo Finale
-    const minimo_consentito = Math.ceil(prezzoFinaleEAN * 1.25);
+    const minimo_consentito = Math.ceil(normPrezzoFinale! * 1.25);
     
-    // Take the maximum
-    listPriceConFee = Math.max(N_candidato_ceiled, minimo_consentito);
+    // FORCE WRITE: Take the maximum and overwrite ListPrice con Fee
+    listPriceConFee = Math.max(candidato_ceil, minimo_consentito);
     
     // Log when rule is activated
     if (typeof (globalThis as any).lpfeeAltRuleCount === 'undefined') {
       (globalThis as any).lpfeeAltRuleCount = 0;
     }
     if ((globalThis as any).lpfeeAltRuleCount < 5) {
-      const reason = !hasListPrice ? 'ListPrice assente' : 
-                     (ListPrice! <= 0 ? 'ListPrice zero o negativo' : 'ListPrice < CustBestPrice');
-      console.warn('lpfee:alternative_rule', {
-        reason,
-        CustBestPrice: CustBestPrice!,
-        ListPrice: ListPrice || 'N/A',
-        PrezzoFinale: prezzoFinaleEAN,
-        baseSubstitutive,
-        N_candidato: N_candidato.toFixed(4),
-        N_candidato_ceiled,
+      const reason = normListPrice === null ? 'ListPrice assente' : 
+                     (normListPrice === 0 ? 'ListPrice zero' : 'ListPrice < CustBestPrice');
+      console.warn('lpfee:override', {
+        motivo: `override ListPrice con Fee: ${reason}`,
+        CustBestPrice: normCustBestPrice,
+        ListPrice: normListPrice !== null ? normListPrice : 'N/A',
+        PrezzoFinale: normPrezzoFinale,
+        base,
+        valore_candidato: valore_candidato.toFixed(4),
+        candidato_ceil,
         minimo_consentito,
-        listPriceConFee
+        ListPriceConFee: listPriceConFee
       });
       (globalThis as any).lpfeeAltRuleCount++;
     }
-  } else if (hasListPrice) {
-    // STANDARD RULE: ListPrice is valid and >= CustBestPrice (or no CustBestPrice)
-    const baseLP = ListPrice!; // use ListPrice as-is, no ceil here
-    const subtotBasSpedLP = baseLP + shipping;
+  } else if (!shouldUseAlternativeRule && normListPrice !== null && normListPrice > 0) {
+    // STANDARD RULE: ListPrice is valid, numeric, > 0, and >= CustBestPrice (or no CustBestPrice)
+    // Keep existing calculation unchanged
+    const baseLP = normListPrice;
+    const subtotBasSpedLP = baseLP + normShipping!;
     const ivaLP = subtotBasSpedLP * 0.22;
     const subtotConIvaLP = subtotBasSpedLP + ivaLP;
-    const postFeeLP = subtotConIvaLP * feeDrev * feeMkt;
-    listPriceConFee = Math.ceil(postFeeLP); // ceil to integer for ListPrice con Fee
+    const postFeeLP = subtotConIvaLP * normFeeDrev! * normFeeMkt!;
+    listPriceConFee = Math.ceil(postFeeLP);
     
-    // Log samples for debugging (static counter to avoid spam)
+    // Log samples for debugging
     if (typeof (globalThis as any).lpfeeCalcSampleCount === 'undefined') {
       (globalThis as any).lpfeeCalcSampleCount = 0;
     }
@@ -320,15 +353,27 @@ function computeFinalPrice({
       console.warn('lpfee:calc:sample', { 
         listPrice: baseLP, 
         subtot_con_iva: subtotConIvaLP.toFixed(2), 
-        feeDeRev: feeDrev, 
-        feeMarketplace: feeMkt, 
+        feeDeRev: normFeeDrev, 
+        feeMarketplace: normFeeMkt, 
         post_fee: postFeeLP.toFixed(4), 
         final: listPriceConFee 
       });
       (globalThis as any).lpfeeCalcSampleCount++;
     }
+  } else if (shouldUseAlternativeRule && !hasValidInputsForAltRule) {
+    // ERROR: Alternative rule should activate but inputs are invalid
+    console.warn('lpfee:input_non_valido', {
+      motivo: 'input non valido per calcolo ListPrice con Fee',
+      normCustBestPrice,
+      normShipping,
+      normIvaPerc,
+      normFeeDrev,
+      normFeeMkt,
+      normPrezzoFinale
+    });
+    // listPriceConFee remains empty string
   }
-  // else: both conditions fail, listPriceConFee remains empty string
+  // else: both conditions fail or inputs invalid, listPriceConFee remains empty string
 
   return { base, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee, eanResult };
 }
