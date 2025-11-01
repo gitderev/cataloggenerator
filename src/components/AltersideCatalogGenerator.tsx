@@ -264,7 +264,47 @@ function computeFinalPrice({
   
   // Calculate ListPrice con Fee - SEPARATE pipeline, independent from main calculation
   let listPriceConFee: number | string = '';
-  if (hasListPrice) {
+  
+  // Check if new rule should be activated
+  const shouldUseAlternativeRule = !hasListPrice || 
+                                     (hasListPrice && ListPrice! <= 0) || 
+                                     (hasListPrice && hasBest && ListPrice! < CustBestPrice!);
+  
+  if (shouldUseAlternativeRule && hasBest) {
+    // NEW RULE: ListPrice is absent, 0, non-numeric, or < CustBestPrice
+    // Use CustBestPrice × 1.25 as base
+    const baseSubstitutive = CustBestPrice! * 1.25;
+    const N_candidato = ((baseSubstitutive + shipping) * ivaMultiplier) * feeDrev * feeMkt;
+    const N_candidato_ceiled = Math.ceil(N_candidato);
+    
+    // Calculate minimum constraint: 25% above Prezzo Finale
+    const minimo_consentito = Math.ceil(prezzoFinaleEAN * 1.25);
+    
+    // Take the maximum
+    listPriceConFee = Math.max(N_candidato_ceiled, minimo_consentito);
+    
+    // Log when rule is activated
+    if (typeof (globalThis as any).lpfeeAltRuleCount === 'undefined') {
+      (globalThis as any).lpfeeAltRuleCount = 0;
+    }
+    if ((globalThis as any).lpfeeAltRuleCount < 5) {
+      const reason = !hasListPrice ? 'ListPrice assente' : 
+                     (ListPrice! <= 0 ? 'ListPrice zero o negativo' : 'ListPrice < CustBestPrice');
+      console.warn('lpfee:alternative_rule', {
+        reason,
+        CustBestPrice: CustBestPrice!,
+        ListPrice: ListPrice || 'N/A',
+        PrezzoFinale: prezzoFinaleEAN,
+        baseSubstitutive,
+        N_candidato: N_candidato.toFixed(4),
+        N_candidato_ceiled,
+        minimo_consentito,
+        listPriceConFee
+      });
+      (globalThis as any).lpfeeAltRuleCount++;
+    }
+  } else if (hasListPrice) {
+    // STANDARD RULE: ListPrice is valid and >= CustBestPrice (or no CustBestPrice)
     const baseLP = ListPrice!; // use ListPrice as-is, no ceil here
     const subtotBasSpedLP = baseLP + shipping;
     const ivaLP = subtotBasSpedLP * 0.22;
@@ -288,6 +328,7 @@ function computeFinalPrice({
       (globalThis as any).lpfeeCalcSampleCount++;
     }
   }
+  // else: both conditions fail, listPriceConFee remains empty string
 
   return { base, shipping, iva, subtotConIva, postFee, prezzoFinaleEAN, prezzoFinaleMPN, listPriceConFee, eanResult };
 }
