@@ -131,6 +131,7 @@ interface ProcessedRecord {
   ListPrice: number;
   CustBestPrice: number;
   Surcharge: number;
+  basePriceCents: number;
   'Costo di Spedizione': number;
   IVA: number;
   'Prezzo con spediz e IVA': number;
@@ -203,44 +204,14 @@ function saveFees(cfg: FeeConfig) {
 
 
 function computeFinalPrice({
-  CustBestPrice, ListPrice, Surcharge, feeDrev, feeMkt, shippingCost
-}: { CustBestPrice?: number; ListPrice?: number; Surcharge?: number; feeDrev: number; feeMkt: number; shippingCost: number; }): {
+  basePriceCents, base, baseRoute, feeDrev, feeMkt, shippingCost, CustBestPrice, ListPrice
+}: { basePriceCents: number; base: number; baseRoute: string; feeDrev: number; feeMkt: number; shippingCost: number; CustBestPrice?: number; ListPrice?: number; }): {
   base: number, shipping: number, iva: number, subtotConIva: number,
   postFee: number, prezzoFinaleEAN: number, prezzoFinaleMPN: number, listPriceConFee: number | string,
   eanResult: { finalCents: number; finalDisplay: string; route: string; debug: any }
 } {
   const shipping = shippingCost;
   const ivaMultiplier = 1.22;
-  
-  const hasBest = Number.isFinite(CustBestPrice) && CustBestPrice! > 0;
-  const hasListPrice = Number.isFinite(ListPrice) && ListPrice! > 0;
-  
-  // Ensure Surcharge is valid and non-negative
-  const validSurcharge = (Number.isFinite(Surcharge) && Surcharge! >= 0) ? Surcharge! : 0;
-  
-  let base = 0;
-  let baseRoute = '';
-  let basePriceCents = 0;
-  
-  // Select base price with route tracking - calculate basePriceCents directly
-  if (hasBest) {
-    // CBP ROUTE: ALWAYS use CustBestPrice + Surcharge
-    base = CustBestPrice! + validSurcharge;
-    basePriceCents = Math.round((CustBestPrice! + validSurcharge) * 100);
-    baseRoute = 'cbp';
-  } else if (hasListPrice) {
-    // LP ROUTE: use ListPrice only with Math.round, NO Surcharge, NO ceil on base
-    base = ListPrice!;
-    basePriceCents = Math.round(ListPrice! * 100);
-    baseRoute = 'listprice';
-  } else {
-    // No valid price
-    const emptyEanResult = { finalCents: 0, finalDisplay: '0,00', route: 'none', debug: {} };
-    return { 
-      base: 0, shipping, iva: 0, subtotConIva: 0, 
-      postFee: 0, prezzoFinaleEAN: 0, prezzoFinaleMPN: 0, listPriceConFee: '', eanResult: emptyEanResult 
-    };
-  }
   
   // Calculate for display/compatibility (old pipeline values)
   const subtot_base_sped = base + shipping;
@@ -278,49 +249,6 @@ function computeFinalPrice({
   
   // MPN final price: use old logic (ceil to integer)
   const prezzoFinaleMPN = Math.ceil(postFee);
-  
-  
-  // Log samples for EAN route debugging (separate counters for cbp vs listprice)
-  if (baseRoute === 'cbp') {
-    if (typeof (globalThis as any).eanSampleCbpCount === 'undefined') {
-      (globalThis as any).eanSampleCbpCount = 0;
-    }
-    if ((globalThis as any).eanSampleCbpCount < 3) {
-      console.warn('ean:sample:cbp', {
-        CustBestPrice: CustBestPrice,
-        Surcharge: validSurcharge,
-        basePriceCents: basePriceCents,
-        base: base,
-        withShipCents: afterShippingCents,
-        withVatCents: afterIvaCents,
-        withFeeDRCents: afterFeeDeRevCents,
-        afterFeesCents: afterFeesCents,
-        finalCents: finalCents,
-        finalDisplay: finalDisplay
-      });
-      (globalThis as any).eanSampleCbpCount++;
-    }
-  } else if (baseRoute === 'listprice') {
-    if (typeof (globalThis as any).eanSampleLpCount === 'undefined') {
-      (globalThis as any).eanSampleLpCount = 0;
-    }
-    if ((globalThis as any).eanSampleLpCount < 3) {
-      console.warn('ean:sample:listprice', {
-        baseSource: 'listprice',
-        originalListPrice: ListPrice,
-        basePriceCents: basePriceCents,
-        base: base,
-        Surcharge_NOT_USED: 'LP route does not use Surcharge',
-        withShipCents: afterShippingCents,
-        withVatCents: afterIvaCents,
-        withFeeDRCents: afterFeeDeRevCents,
-        afterFeesCents: afterFeesCents,
-        finalCents: finalCents,
-        finalDisplay: finalDisplay
-      });
-      (globalThis as any).eanSampleLpCount++;
-    }
-  }
   
   // Helper function for robust numeric normalization
   const normalizeNumeric = (value: any): number | null => {
@@ -1097,24 +1025,9 @@ const AltersideCatalogGenerator: React.FC = () => {
     };
 
     const computeFinalPriceForEAN = (row: any): number => {
-      const custBestPrice = parseFloat(row.CustBestPrice);
-      const listPrice = parseFloat(row.ListPrice);
-      const surcharge = parseFloat(row.Surcharge) || 0;
-      
-      const hasBest = Number.isFinite(custBestPrice) && custBestPrice > 0;
-      const hasListPrice = Number.isFinite(listPrice) && listPrice > 0;
-      
-      let basePriceCents = 0;
-      
-      if (hasBest) {
-        // CBP ROUTE: CustBestPrice + Surcharge
-        basePriceCents = Math.round((custBestPrice + surcharge) * 100);
-      } else if (hasListPrice) {
-        // LP ROUTE: ListPrice only, NO Surcharge
-        basePriceCents = Math.round(listPrice * 100);
-      } else {
-        return 0;
-      }
+      // basePriceCents must be pre-calculated and stored in row
+      const basePriceCents = row.basePriceCents || 0;
+      if (basePriceCents === 0) return 0;
       
       // Calculate in cents: shipping + IVA + fees
       const shippingCents = Math.round(feeConfig.shippingCost * 100);
@@ -1282,8 +1195,10 @@ const AltersideCatalogGenerator: React.FC = () => {
           return;
         }
 
+        // CALCULATE basePriceCents using LP/CBP logic BEFORE calling computeFinalPrice
         const hasBest = Number.isFinite(custBestPrice) && custBestPrice > 0;
         const hasListPrice = Number.isFinite(listPrice) && listPrice > 0;
+        
         if (!hasBest && !hasListPrice) {
           logsEAN.push({
             source_file: 'MaterialFile',
@@ -1305,14 +1220,68 @@ const AltersideCatalogGenerator: React.FC = () => {
           });
           return;
         }
+        
+        // Ensure surcharge is valid and non-negative
+        const validSurcharge = (Number.isFinite(surcharge) && surcharge >= 0) ? surcharge : 0;
+        
+        let basePriceCents = 0;
+        let base = 0;
+        let baseRoute = '';
+        
+        if (hasBest) {
+          // CBP ROUTE: ALWAYS use CustBestPrice + Surcharge, sum cents separately
+          const custBestPriceCents = Math.round(custBestPrice * 100);
+          const surchargeCents = Math.round(validSurcharge * 100);
+          basePriceCents = custBestPriceCents + surchargeCents;
+          base = custBestPrice + validSurcharge;
+          baseRoute = 'cbp';
+        } else if (hasListPrice) {
+          // LP ROUTE: use ListPrice only with Math.round, NO Surcharge
+          basePriceCents = Math.round(listPrice * 100);
+          base = listPrice;
+          baseRoute = 'listprice';
+        }
+        
+        // Log samples for LP/CBP debugging (only first 3 of each)
+        if (baseRoute === 'cbp') {
+          if (typeof (globalThis as any).eanSampleCbpCount === 'undefined') {
+            (globalThis as any).eanSampleCbpCount = 0;
+          }
+          if ((globalThis as any).eanSampleCbpCount < 3) {
+            console.warn('ean:sample:cbp:upstream', {
+              custBestPrice,
+              surcharge: validSurcharge,
+              custBestPriceCents: Math.round(custBestPrice * 100),
+              surchargeCents: Math.round(validSurcharge * 100),
+              basePriceCents,
+              base
+            });
+            (globalThis as any).eanSampleCbpCount++;
+          }
+        } else if (baseRoute === 'listprice') {
+          if (typeof (globalThis as any).eanSampleLpCount === 'undefined') {
+            (globalThis as any).eanSampleLpCount = 0;
+          }
+          if ((globalThis as any).eanSampleLpCount < 3) {
+            console.warn('ean:sample:listprice:upstream', {
+              listPrice,
+              basePriceCents,
+              base,
+              Surcharge_NOT_USED: 'LP route does not use Surcharge'
+            });
+            (globalThis as any).eanSampleLpCount++;
+          }
+        }
 
         const calc = computeFinalPrice({
-          CustBestPrice: custBestPrice,
-          ListPrice: listPrice,
-          Surcharge: surcharge,
+          basePriceCents,
+          base,
+          baseRoute,
           feeDrev: feeConfig.feeDrev,
           feeMkt: feeConfig.feeMkt,
-          shippingCost: feeConfig.shippingCost
+          shippingCost: feeConfig.shippingCost,
+          CustBestPrice: custBestPrice,
+          ListPrice: listPrice
         });
 
         const processedRecord: ProcessedRecord = {
@@ -1324,6 +1293,7 @@ const AltersideCatalogGenerator: React.FC = () => {
           ListPrice: listPrice,
           CustBestPrice: custBestPrice,
           Surcharge: surcharge,
+          basePriceCents: basePriceCents, // Store for computeFinalPriceForEAN
           'Costo di Spedizione': calc.shipping,
           IVA: calc.iva,
           'Prezzo con spediz e IVA': calc.subtotConIva,
