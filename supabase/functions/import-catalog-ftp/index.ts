@@ -17,6 +17,7 @@ interface SuccessResponse {
   status: "ok";
   files: {
     stockFile: FileResult;
+    priceFile: FileResult;
   };
 }
 
@@ -26,8 +27,9 @@ interface ErrorResponse {
   message: string;
 }
 
-// TEST: Only Stock file for now
+// TEST: Stock + Price files
 const STOCK_FILE = { ftpName: "StockFileData_790813.txt", folder: "stock", prefix: "StockFileData" };
+const PRICE_FILE = { ftpName: "pricefileData_790813.txt", folder: "price", prefix: "pricefileData" };
 
 const TIMEOUT_MS = 300000; // 5 minutes
 const BUCKET_NAME = "ftp-import";
@@ -171,7 +173,7 @@ class FTPClient {
       throw new Error(`FTP_DOWNLOAD_FAILED:${retrResp}`);
     }
     
-    // Read all data using readAll approach
+    // Read all data
     const chunks: Uint8Array[] = [];
     let totalSize = 0;
     
@@ -187,7 +189,6 @@ class FTPClient {
       console.log(`Read completed or error: ${e}`);
     }
     
-    // Close data connection safely
     try { dataConn.close(); } catch (_) { /* ignore */ }
     
     // Wait for transfer complete
@@ -197,15 +198,13 @@ class FTPClient {
       console.warn("Unexpected transfer complete response:", completeResp);
     }
     
-    // Combine chunks into single buffer
+    // Combine chunks
     const result = new Uint8Array(totalSize);
     let offset = 0;
     for (const chunk of chunks) {
       result.set(chunk, offset);
       offset += chunk.length;
     }
-    
-    // Clear chunks to help GC
     chunks.length = 0;
     
     console.log(`Downloaded ${filename}: ${totalSize} bytes`);
@@ -214,26 +213,11 @@ class FTPClient {
 
   async close(): Promise<void> {
     if (this.conn) {
-      try {
-        await this.sendCommand("QUIT");
-      } catch (_e) {
-        // Ignore
-      }
-      
+      try { await this.sendCommand("QUIT"); } catch (_e) { /* ignore */ }
       if (this.reader) {
-        try {
-          this.reader.releaseLock();
-        } catch (_e) {
-          // Ignore
-        }
+        try { this.reader.releaseLock(); } catch (_e) { /* ignore */ }
       }
-      
-      try {
-        this.conn.close();
-      } catch (_e) {
-        // Ignore
-      }
-      
+      try { this.conn.close(); } catch (_e) { /* ignore */ }
       this.conn = null;
       this.reader = null;
     }
@@ -242,13 +226,9 @@ class FTPClient {
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorCode: string): Promise<T> {
   let timeoutId: number;
-  
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error(`${errorCode}:Operation timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    timeoutId = setTimeout(() => reject(new Error(`${errorCode}:Timeout`)), timeoutMs);
   });
-  
   try {
     const result = await Promise.race([promise, timeoutPromise]);
     clearTimeout(timeoutId!);
@@ -257,6 +237,47 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorCode:
     clearTimeout(timeoutId!);
     throw e;
   }
+}
+
+// Helper to download and upload a single file
+async function processFile(
+  client: FTPClient,
+  supabase: ReturnType<typeof createClient>,
+  fileConfig: { ftpName: string; folder: string; prefix: string },
+  timestamp: number
+): Promise<FileResult> {
+  console.log(`Processing: ${fileConfig.ftpName}`);
+  
+  // Download from FTP
+  const fileBuffer = await withTimeout(client.downloadFile(fileConfig.ftpName), TIMEOUT_MS, "FTP_TIMEOUT");
+  const fileSize = fileBuffer.length;
+  console.log(`Downloaded: ${fileSize} bytes`);
+  
+  // Upload to Storage
+  const newFilename = `${fileConfig.prefix}_${timestamp}.txt`;
+  const storagePath = `${fileConfig.folder}/${newFilename}`;
+  
+  console.log(`Uploading to: ${storagePath}`);
+  
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET_NAME)
+    .upload(storagePath, fileBuffer, { contentType: "text/plain", upsert: true });
+  
+  if (uploadError) {
+    throw new Error(`STORAGE_ERROR:${uploadError.message}`);
+  }
+  
+  console.log(`Uploaded successfully`);
+  
+  // Get public URL
+  const { data: urlData } = supabase.storage.from(BUCKET_NAME).getPublicUrl(storagePath);
+  
+  return {
+    filename: newFilename,
+    path: storagePath,
+    url: urlData.publicUrl,
+    size: fileSize,
+  };
 }
 
 serve(async (req) => {
@@ -274,7 +295,6 @@ serve(async (req) => {
   let client: FTPClient | null = null;
 
   try {
-    // Read secrets
     const ftpHost = Deno.env.get('FTP_HOST');
     const ftpUser = Deno.env.get('FTP_USER');
     const ftpPass = Deno.env.get('FTP_PASSWORD');
@@ -303,11 +323,9 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     client = new FTPClient(ftpUseTLS);
 
-    // Connect
     await withTimeout(client.connect(ftpHost, ftpPort), TIMEOUT_MS, "FTP_TIMEOUT");
     await withTimeout(client.login(ftpUser, ftpPass), TIMEOUT_MS, "FTP_TIMEOUT");
 
-    // Change directory
     try {
       await withTimeout(client.cwd(ftpInputDir), TIMEOUT_MS, "FTP_TIMEOUT");
     } catch (e) {
@@ -323,72 +341,49 @@ serve(async (req) => {
 
     const timestamp = Date.now();
 
-    // Download ONLY Stock file
-    console.log(`Processing ONLY Stock file: ${STOCK_FILE.ftpName}`);
-    
-    let fileBuffer: Uint8Array;
+    // Process Stock file first (smaller ~6MB)
+    let stockResult: FileResult;
     try {
-      fileBuffer = await withTimeout(client.downloadFile(STOCK_FILE.ftpName), TIMEOUT_MS, "FTP_TIMEOUT");
+      stockResult = await processFile(client, supabase, STOCK_FILE, timestamp);
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
       if (errMsg.includes("FILE_NOT_FOUND")) {
         return new Response(
-          JSON.stringify({ status: "error", code: "FILE_NOT_FOUND", message: `File ${STOCK_FILE.ftpName} not found` } as ErrorResponse),
+          JSON.stringify({ status: "error", code: "FILE_NOT_FOUND", message: `Stock file not found` } as ErrorResponse),
           { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
       throw e;
     }
 
-    const fileSize = fileBuffer.length;
-    console.log(`Stock file downloaded: ${fileSize} bytes`);
-
-    // Close FTP connection before upload to free resources
-    await client.close();
-    client = null;
-
-    // Upload to Storage
-    const newFilename = `${STOCK_FILE.prefix}_${timestamp}.txt`;
-    const storagePath = `${STOCK_FILE.folder}/${newFilename}`;
-    
-    console.log(`Uploading to Storage: ${storagePath}`);
-    
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET_NAME)
-      .upload(storagePath, fileBuffer, {
-        contentType: "text/plain",
-        upsert: true,
-      });
-
-    // Clear buffer after upload
-    fileBuffer = new Uint8Array(0);
-
-    if (uploadError) {
-      console.error(`Upload error:`, uploadError);
-      return new Response(
-        JSON.stringify({ status: "error", code: "STORAGE_ERROR", message: `Upload failed: ${uploadError.message}` } as ErrorResponse),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+    // Process Price file (~50MB)
+    let priceResult: FileResult;
+    try {
+      priceResult = await processFile(client, supabase, PRICE_FILE, timestamp);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      if (errMsg.includes("FILE_NOT_FOUND")) {
+        return new Response(
+          JSON.stringify({ status: "error", code: "FILE_NOT_FOUND", message: `Price file not found` } as ErrorResponse),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      throw e;
     }
 
-    console.log(`Uploaded successfully`);
-
-    // Get public URL
-    const { data: urlData } = supabase.storage.from(BUCKET_NAME).getPublicUrl(storagePath);
+    // Close FTP connection
+    await client.close();
+    client = null;
 
     const response: SuccessResponse = {
       status: "ok",
       files: {
-        stockFile: {
-          filename: newFilename,
-          path: storagePath,
-          url: urlData.publicUrl,
-          size: fileSize,
-        },
+        stockFile: stockResult,
+        priceFile: priceResult,
       },
     };
 
-    console.log("Stock file processed successfully");
+    console.log("All files processed successfully");
     
     return new Response(
       JSON.stringify(response),
@@ -406,11 +401,7 @@ serve(async (req) => {
     
   } finally {
     if (client) {
-      try {
-        await client.close();
-      } catch (_e) {
-        // Ignore
-      }
+      try { await client.close(); } catch (_e) { /* ignore */ }
     }
   }
 });
