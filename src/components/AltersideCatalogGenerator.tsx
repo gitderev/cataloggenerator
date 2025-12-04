@@ -467,6 +467,9 @@ const AltersideCatalogGenerator: React.FC = () => {
 
   const workerRef = useRef<Worker | null>(null);
 
+  // FTP import loading state
+  const [ftpImportLoading, setFtpImportLoading] = useState(false);
+
   const isProcessing = processingState === 'running';
   const isCompleted = processingState === 'completed';
   const canProcess = processingState === 'ready';
@@ -764,6 +767,111 @@ const AltersideCatalogGenerator: React.FC = () => {
     const seconds = Math.floor(ms / 1000);
     const minutes = Math.floor(seconds / 60);
     return `${minutes.toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
+  };
+
+  // FTP automatic import handler
+  const handleFtpImport = async () => {
+    setFtpImportLoading(true);
+    
+    try {
+      const res = await fetch(
+        "https://hdcniibdblgqkhhgbqtz.supabase.co/functions/v1/import-catalog-ftp",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        }
+      );
+
+      const data = await res.json();
+
+      if (!res.ok || data.status !== "ok") {
+        toast({
+          title: "Errore import FTP",
+          description: data.message || "Import FTP fallito. Verifica la configurazione dell'FTP o riprova più tardi.",
+          variant: "destructive"
+        });
+        return;
+      }
+
+      const materialContent = data.files?.materialFile?.content;
+      const priceContent = data.files?.priceFile?.content;
+      const stockContent = data.files?.stockFile?.content;
+
+      if (!materialContent || !priceContent || !stockContent) {
+        toast({
+          title: "Errore import FTP",
+          description: "La risposta FTP non contiene tutti i file richiesti (Material, Price, Stock).",
+          variant: "destructive"
+        });
+        return;
+      }
+
+      const materialVirtualFile = new File(
+        [materialContent],
+        data.files?.materialFile?.filename || "MaterialFile.txt",
+        { type: "text/plain" }
+      );
+
+      const stockVirtualFile = new File(
+        [stockContent],
+        data.files?.stockFile?.filename || "StockFileData_790813.txt",
+        { type: "text/plain" }
+      );
+
+      const priceVirtualFile = new File(
+        [priceContent],
+        data.files?.priceFile?.filename || "pricefileData_790813.txt",
+        { type: "text/plain" }
+      );
+
+      try {
+        await handleFileUpload(materialVirtualFile, "material");
+      } catch (error) {
+        toast({
+          title: "Errore parsing file FTP",
+          description: `Errore durante il parsing di ${materialVirtualFile.name}`,
+          variant: "destructive"
+        });
+        return;
+      }
+
+      try {
+        await handleFileUpload(stockVirtualFile, "stock");
+      } catch (error) {
+        toast({
+          title: "Errore parsing file FTP",
+          description: `Errore durante il parsing di ${stockVirtualFile.name}`,
+          variant: "destructive"
+        });
+        return;
+      }
+
+      try {
+        await handleFileUpload(priceVirtualFile, "price");
+      } catch (error) {
+        toast({
+          title: "Errore parsing file FTP",
+          description: `Errore durante il parsing di ${priceVirtualFile.name}`,
+          variant: "destructive"
+        });
+        return;
+      }
+
+      toast({
+        title: "Import FTP completato",
+        description: "I file Material, Stock e Price sono stati importati dal server FTP."
+      });
+
+    } catch (error) {
+      toast({
+        title: "Errore import FTP",
+        description: "Impossibile contattare il servizio di import FTP.",
+        variant: "destructive"
+      });
+    } finally {
+      setFtpImportLoading(false);
+    }
   };
 
   // Timer effect
@@ -2789,6 +2897,27 @@ const AltersideCatalogGenerator: React.FC = () => {
               </div>
             </div>
           </div>
+        </div>
+
+        {/* FTP Import Button */}
+        <div className="flex justify-end mb-4">
+          <Button
+            variant="outline"
+            onClick={handleFtpImport}
+            disabled={ftpImportLoading || isProcessing}
+          >
+            {ftpImportLoading ? (
+              <>
+                <Activity className="mr-2 h-4 w-4 animate-spin" />
+                Import da FTP in corso…
+              </>
+            ) : (
+              <>
+                <Download className="mr-2 h-4 w-4" />
+                Importa automaticamente da FTP
+              </>
+            )}
+          </Button>
         </div>
 
         {/* File Upload Cards */}
