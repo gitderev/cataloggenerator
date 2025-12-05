@@ -526,6 +526,14 @@ const AltersideCatalogGenerator: React.FC = () => {
   const [currentLogEntries, setCurrentLogEntries] = useState<LogEntry[]>([]);
   const [currentStats, setCurrentStats] = useState<ProcessingStats | null>(null);
   
+  // =====================================================================
+  // EAN CATALOG DATASET - FONTE UNICA PER TUTTI GLI EXPORT
+  // Questo dataset viene generato durante l'export del Catalogo EAN e
+  // contiene i prezzi finali formattati ("NN,99"). Viene riutilizzato
+  // da ePrice e Mediaworld per garantire coerenza dei prezzi.
+  // =====================================================================
+  const [eanCatalogDataset, setEanCatalogDataset] = useState<any[]>([]);
+  
   // Stats state for UI
   const [stats, setStats] = useState({
     totalRows: 0,
@@ -1921,6 +1929,14 @@ const AltersideCatalogGenerator: React.FC = () => {
         return exportRecord;
       });
       
+      // =====================================================================
+      // SALVA IL DATASET FINALE PER RIUTILIZZO IN EPRICE E MEDIAWORLD
+      // Questo dataset contiene i prezzi formattati "NN,99" e sarà usato
+      // come UNICA FONTE DI VERITÀ per tutti gli export.
+      // =====================================================================
+      setEanCatalogDataset(cleanDataset);
+      console.warn('eanCatalogDataset:saved', { rows: cleanDataset.length });
+      
       // Create worksheet from clean dataset
       const ws = XLSX.utils.json_to_sheet(cleanDataset, { skipHeader: false });
       
@@ -2240,8 +2256,32 @@ const AltersideCatalogGenerator: React.FC = () => {
     setIsExportingEprice(true);
     
     try {
-      // Get EAN filtered data - same logic as onExportEAN
-      const eanFilteredData = currentProcessedData.filter(record => record.EAN && record.EAN.length >= 12);
+      // =====================================================================
+      // FONTE UNICA: USARE IL DATASET DEL CATALOGO EAN
+      // Il dataset eanCatalogDataset contiene i prezzi formattati "NN,99"
+      // esattamente come vengono scritti nel file Excel del Catalogo EAN.
+      // Se il dataset è vuoto, l'utente deve prima generare il Catalogo EAN.
+      // =====================================================================
+      
+      if (!eanCatalogDataset || eanCatalogDataset.length === 0) {
+        toast({
+          title: "Catalogo EAN non disponibile",
+          description: "Devi prima generare il Catalogo EAN prima di esportare per ePrice",
+          variant: "destructive"
+        });
+        setIsExportingEprice(false);
+        return;
+      }
+      
+      // Usa direttamente il dataset del Catalogo EAN (già filtrato per EAN validi)
+      const eanFilteredData = eanCatalogDataset.filter((record: any) => record.EAN && String(record.EAN).length >= 12);
+      
+      // Log di debug per verificare la fonte dati
+      console.warn('eprice:source', { 
+        usingEanCatalogDataset: true, 
+        totalRows: eanCatalogDataset.length,
+        filteredRows: eanFilteredData.length 
+      });
       
       if (eanFilteredData.length === 0) {
         toast({
@@ -2326,6 +2366,17 @@ const AltersideCatalogGenerator: React.FC = () => {
               }
             }
           }
+        }
+        
+        // LOG DI DEBUG per i primi 5 record - verifica coerenza prezzi
+        if (index < 5) {
+          console.warn(`eprice:debug:row${index}`, {
+            EAN: ean,
+            SKU: sku,
+            'Prezzo Finale RAW (from eanCatalogDataset)': prezzoFinaleRaw,
+            'Prezzo Finale NUMBER (after conversion)': prezzoFinaleNumber,
+            ExistingStock: quantity
+          });
         }
         
         // Validate price exists and is valid
@@ -2506,7 +2557,7 @@ const AltersideCatalogGenerator: React.FC = () => {
     } finally {
       setIsExportingEprice(false);
     }
-  }, [currentProcessedData, isExportingEprice, feeConfig, prepDays, toast, validateEpriceStructure]);
+  }, [eanCatalogDataset, isExportingEprice, prepDays, toast, validateEpriceStructure]);
 
   // Mediaworld Export Function - reuses EAN dataset
   const onExportMediaworld = useCallback(async (event: React.MouseEvent) => {
@@ -2519,6 +2570,37 @@ const AltersideCatalogGenerator: React.FC = () => {
       });
       return;
     }
+    
+    // =====================================================================
+    // FONTE UNICA: USARE IL DATASET DEL CATALOGO EAN
+    // Il dataset eanCatalogDataset contiene i prezzi formattati "NN,99"
+    // esattamente come vengono scritti nel file Excel del Catalogo EAN.
+    // =====================================================================
+    if (!eanCatalogDataset || eanCatalogDataset.length === 0) {
+      toast({
+        title: "Catalogo EAN non disponibile",
+        description: "Devi prima generare il Catalogo EAN prima di esportare per Mediaworld",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    // Log di debug per verificare la fonte dati
+    console.warn('mediaworld:source', { 
+      usingEanCatalogDataset: true, 
+      totalRows: eanCatalogDataset.length 
+    });
+    
+    // Log di debug per i primi 5 record
+    eanCatalogDataset.slice(0, 5).forEach((record: any, idx: number) => {
+      console.warn(`mediaworld:debug:row${idx}`, {
+        EAN: record.EAN,
+        SKU: record.ManufPartNr,
+        'Prezzo Finale RAW': record['Prezzo Finale'],
+        'ListPrice con Fee RAW': record['ListPrice con Fee'],
+        ExistingStock: record.ExistingStock
+      });
+    });
     
     // Validate prepDaysMediaworld
     if (!Number.isInteger(prepDaysMediaworld) || prepDaysMediaworld < 1 || prepDaysMediaworld > 45) {
@@ -2533,8 +2615,9 @@ const AltersideCatalogGenerator: React.FC = () => {
     setIsExportingMediaworld(true);
     
     try {
+      // USA eanCatalogDataset come fonte unica invece di currentProcessedData
       const result = await exportMediaworldCatalog({
-        processedData: currentProcessedData,
+        processedData: eanCatalogDataset,
         feeConfig,
         prepDays: prepDaysMediaworld
       });
@@ -2544,7 +2627,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         exportType: 'Mediaworld',
         timestamp: new Date(),
         success: result.success ?? false,
-        totalRows: currentProcessedData.length,
+        totalRows: eanCatalogDataset.length,
         validRows: result.rowCount ?? 0,
         skippedRows: result.skippedCount ?? 0,
         errors: (result.validationErrors ?? []).map(e => ({
@@ -2606,7 +2689,7 @@ const AltersideCatalogGenerator: React.FC = () => {
     } finally {
       setIsExportingMediaworld(false);
     }
-  }, [currentProcessedData, isExportingMediaworld, feeConfig, prepDaysMediaworld, toast]);
+  }, [eanCatalogDataset, isExportingMediaworld, feeConfig, prepDaysMediaworld, toast]);
 
   const downloadExcel = (type: 'ean' | 'manufpartnr') => {
     if (type === 'ean') {
