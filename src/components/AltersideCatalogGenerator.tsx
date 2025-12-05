@@ -10,6 +10,7 @@ import { Upload, Download, FileText, CheckCircle, XCircle, AlertCircle, Clock, A
 import { useAuth } from '@/hooks/useAuth';
 import { filterAndNormalizeForEAN, type EANStats, type DiscardedRow } from '@/utils/ean';
 import { forceEANText, exportDiscardedRowsCSV } from '@/utils/excelFormatter';
+import { exportMediaworldCatalog } from '@/utils/mediaworldExport';
 import { 
   toComma99Cents, 
   validateEnding99, 
@@ -546,9 +547,13 @@ const AltersideCatalogGenerator: React.FC = () => {
   // Export state for preventing double clicks
   const [isExportingEAN, setIsExportingEAN] = useState(false);
   const [isExportingEprice, setIsExportingEprice] = useState(false);
+  const [isExportingMediaworld, setIsExportingMediaworld] = useState(false);
   
   // ePrice export configuration
   const [prepDays, setPrepDays] = useState<number>(1);
+  
+  // Mediaworld export configuration
+  const [prepDaysMediaworld, setPrepDaysMediaworld] = useState<number>(3);
 
   const workerRef = useRef<Worker | null>(null);
 
@@ -2292,6 +2297,61 @@ const AltersideCatalogGenerator: React.FC = () => {
     }
   }, [currentProcessedData, isExportingEprice, feeConfig, prepDays, toast]);
 
+  // Mediaworld Export Function - reuses EAN dataset
+  const onExportMediaworld = useCallback(async (event: React.MouseEvent) => {
+    event.preventDefault();
+    
+    if (isExportingMediaworld) {
+      toast({
+        title: "Esportazione in corso...",
+        description: "Attendere completamento dell'esportazione Mediaworld"
+      });
+      return;
+    }
+    
+    // Validate prepDaysMediaworld
+    if (!Number.isInteger(prepDaysMediaworld) || prepDaysMediaworld < 1 || prepDaysMediaworld > 45) {
+      toast({
+        title: "Errore validazione",
+        description: "I giorni di preparazione devono essere un numero intero tra 1 e 45",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    setIsExportingMediaworld(true);
+    
+    try {
+      const result = await exportMediaworldCatalog({
+        processedData: currentProcessedData,
+        feeConfig,
+        prepDays: prepDaysMediaworld
+      });
+      
+      if (result.success) {
+        toast({
+          title: "Export Mediaworld completato",
+          description: `File mediaworld-offers-*.xlsx generato con ${result.rowCount} righe`
+        });
+      } else {
+        toast({
+          title: "Errore export Mediaworld",
+          description: result.error || "Errore sconosciuto",
+          variant: "destructive"
+        });
+      }
+    } catch (error) {
+      console.error('Errore export Mediaworld:', error);
+      toast({
+        title: "Errore export Mediaworld",
+        description: error instanceof Error ? error.message : "Errore sconosciuto durante l'export",
+        variant: "destructive"
+      });
+    } finally {
+      setIsExportingMediaworld(false);
+    }
+  }, [currentProcessedData, isExportingMediaworld, feeConfig, prepDaysMediaworld, toast]);
+
   const downloadExcel = (type: 'ean' | 'manufpartnr') => {
     if (type === 'ean') {
       // Use the new onExportEAN function for EAN catalog
@@ -3646,6 +3706,47 @@ const AltersideCatalogGenerator: React.FC = () => {
                 </div>
                 <p className="text-xs text-muted-foreground mt-3">
                   Genera il file "Tracciato_Pubblicazione_Offerte_new.xlsx" per ePrice
+                </p>
+              </div>
+            )}
+            
+            {/* Mediaworld Export Section - Only for EAN pipeline */}
+            {currentPipeline === 'EAN' && (
+              <div className="mt-8 p-6 rounded-lg border" style={{ background: '#fef3c7' }}>
+                <h4 className="text-lg font-semibold mb-4 text-amber-800">Esporta Catalogo Mediaworld</h4>
+                <div className="flex flex-wrap items-center justify-center gap-4">
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="prepDaysMediaworld" className="text-sm font-medium whitespace-nowrap">
+                      Tempo di preparazione spedizione (giorni):
+                    </Label>
+                    <Input
+                      id="prepDaysMediaworld"
+                      type="number"
+                      min={1}
+                      max={45}
+                      value={prepDaysMediaworld}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        if (!isNaN(val) && val >= 1 && val <= 45) {
+                          setPrepDaysMediaworld(val);
+                        }
+                      }}
+                      className="w-20 text-center"
+                    />
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={onExportMediaworld}
+                    disabled={isExportingMediaworld}
+                    className={`btn btn-primary text-lg px-8 py-3 ${isExportingMediaworld ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    style={{ background: '#d97706' }}
+                  >
+                    <Download className="mr-3 h-5 w-5" />
+                    {isExportingMediaworld ? 'ESPORTAZIONE...' : 'Genera catalogo Mediaworld (.xlsx)'}
+                  </button>
+                </div>
+                <p className="text-xs text-muted-foreground mt-3">
+                  Genera il file "mediaworld-offers-YYYYMMDD.xlsx" con formato Mediaworld
                 </p>
               </div>
             )}
