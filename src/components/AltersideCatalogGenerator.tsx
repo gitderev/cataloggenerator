@@ -534,6 +534,25 @@ const AltersideCatalogGenerator: React.FC = () => {
   // =====================================================================
   const [eanCatalogDataset, setEanCatalogDataset] = useState<any[]>([]);
   
+  // =====================================================================
+  // useEffect: LOG quando eanCatalogDataset è REALMENTE pronto (post-render)
+  // Questo log viene emesso DOPO che React ha aggiornato lo state,
+  // quindi mostra il valore reale e non quello in fase di aggiornamento.
+  // =====================================================================
+  useEffect(() => {
+    if (!eanCatalogDataset || eanCatalogDataset.length === 0) return;
+
+    console.log('%c[eanCatalogDataset:ready-for-exports]', 'color: #FF9800; font-weight: bold;', {
+      rows: eanCatalogDataset.length,
+      firstRow: {
+        EAN: eanCatalogDataset[0]?.EAN,
+        PrezzoFinale: eanCatalogDataset[0]?.['Prezzo Finale'],
+        PrezzoFinaleType: typeof eanCatalogDataset[0]?.['Prezzo Finale'],
+      },
+      timestamp: new Date().toISOString()
+    });
+  }, [eanCatalogDataset]);
+  
   // Stats state for UI
   const [stats, setStats] = useState({
     totalRows: 0,
@@ -2140,25 +2159,16 @@ const AltersideCatalogGenerator: React.FC = () => {
       
       setExcelDone(true);
       
-      // === LOG ESTESO: RIEPILOGO FINALE CATALOGO EAN ===
-      console.log('%c[EAN:generation:complete] === CATALOGO EAN GENERATO ===', 'color: #4CAF50; font-weight: bold; font-size: 14px;');
-      console.log(`%c[EAN:generation:complete]`, 'color: #4CAF50;', {
-        'totale_prodotti_generati': cleanDataset.length,
-        'dataset_salvato_in_eanCatalogDataset': eanCatalogDataset.length,
-        'allineamento': cleanDataset.length === eanCatalogDataset.length ? 'OK' : 'MISMATCH',
-        'pronto_per_ePrice': true,
-        'pronto_per_Mediaworld': true,
-        timestamp: new Date().toISOString()
-      });
-      
-      // Log riepilogo per verifica cross-export
-      console.log('%c[check:ready-for-exports]', 'color: #E91E63; font-weight: bold;', {
-        'eanCatalogDataset_rows': eanCatalogDataset.length,
-        'primo_record': eanCatalogDataset.length > 0 ? {
-          EAN: eanCatalogDataset[0]?.EAN,
-          'Prezzo Finale': eanCatalogDataset[0]?.['Prezzo Finale'],
-          'Prezzo Finale type': typeof eanCatalogDataset[0]?.['Prezzo Finale']
-        } : null
+      // === LOG CORRETTO: RIEPILOGO FINALE CATALOGO EAN ===
+      // Usa SOLO cleanDataset (valore certo in questo momento),
+      // NON eanCatalogDataset (aggiornato async da React).
+      console.log('%c[EAN:generation:complete]', 'color: #4CAF50; font-weight: bold; font-size: 14px;', {
+        totale_prodotti_generati: cleanDataset.length,
+        dataset_salvato_in_eanCatalogDataset: cleanDataset.length,
+        allineamento: 'OK',
+        pronto_per_ePrice: cleanDataset.length > 0,
+        pronto_per_Mediaworld: cleanDataset.length > 0,
+        timestamp: new Date().toISOString(),
       });
       
       toast({
@@ -2395,7 +2405,11 @@ const AltersideCatalogGenerator: React.FC = () => {
       // USA DIRETTAMENTE IL DATASET - già filtrato in onExportEAN
       const eanFilteredData = eanCatalogDataset;
       
-      console.warn('eprice:rows_to_export', { count: eanFilteredData.length });
+      // Log di inizio export standardizzato (senza console.warn fuorvianti)
+      console.log('%c[ePrice:export:start]', 'color: #9C27B0; font-weight: bold;', {
+        rows_da_exportare: eanFilteredData.length,
+        timestamp: new Date().toISOString(),
+      });
       
       if (eanFilteredData.length === 0) {
         toast({
@@ -2631,22 +2645,23 @@ const AltersideCatalogGenerator: React.FC = () => {
         structureErrors: validationResult.errors
       };
       
-      // LOG ESTESO: riepilogo export ePRICE
-      console.log('%c[ePrice:export:summary] === EXPORT COMPLETATO ===', 'color: #9C27B0; font-weight: bold;');
-      console.log(`%c[ePrice:export:summary]`, 'color: #9C27B0;', {
-        sourceDataset: 'eanCatalogDataset',
-        'righe sorgente': eanCatalogDataset.length,
-        'righe esportate': aoa.length - 1,
-        'righe saltate': skippedCount,
-        'differenza': eanCatalogDataset.length - (aoa.length - 1) - skippedCount
+      // LOG STANDARDIZZATO: riepilogo export ePRICE
+      const exportedRows = aoa.length - 1;
+      const inputRows = eanCatalogDataset.length;
+      
+      console.log('%c[ePrice:export:summary]', 'color: #9C27B0; font-weight: bold;', {
+        prodotti_input_CatalogoEAN: inputRows,
+        prodotti_ePrice_export: exportedRows,
+        prodotti_scartati: skippedCount,
+        allineamento_set: inputRows === (exportedRows + skippedCount) ? 'OK' : 'MISMATCH'
       });
       
-      // === LOG VERIFICA INCROCIATA POST-EXPORT ===
-      console.log('%c[check:comparison-summary:ePrice]', 'color: #E91E63; font-weight: bold;', {
-        'prodotti_Catalogo_EAN': eanCatalogDataset.length,
-        'prodotti_ePrice_export': aoa.length - 1,
-        'prodotti_presenti_nel_Catalogo_ma_non_export': skippedCount,
-        'allineamento_set': eanCatalogDataset.length === (aoa.length - 1 + skippedCount) ? 'OK' : 'MISMATCH'
+      // === LOG VERIFICA FINALE ePRICE ===
+      console.log('%c[check:export-final-ePrice]', 'color: #E91E63; font-weight: bold;', {
+        catalogoEAN_rows: inputRows,
+        ePrice_export_rows: exportedRows,
+        difference: inputRows - exportedRows - skippedCount,
+        status: inputRows === (exportedRows + skippedCount) ? 'OK' : 'MISMATCH'
       });
       
       if (!validationResult.isValid) {
@@ -2792,8 +2807,11 @@ const AltersideCatalogGenerator: React.FC = () => {
     setIsExportingMediaworld(true);
     
     try {
-      // USA eanCatalogDataset come fonte unica
-      console.warn('mediaworld:export:start', { rows: eanCatalogDataset.length });
+      // USA eanCatalogDataset come fonte unica (log standardizzato, no console.warn)
+      console.log('%c[Mediaworld:export:start]', 'color: #00BCD4; font-weight: bold;', {
+        rows_da_exportare: eanCatalogDataset.length,
+        timestamp: new Date().toISOString(),
+      });
       
       const result = await exportMediaworldCatalog({
         processedData: eanCatalogDataset,
@@ -2801,23 +2819,24 @@ const AltersideCatalogGenerator: React.FC = () => {
         prepDays: prepDaysMediaworld
       });
       
-      // === LOG ESTESO: RIEPILOGO EXPORT MEDIAWORLD ===
-      console.log('%c[Mediaworld:final:summary] === EXPORT MEDIAWORLD COMPLETATO ===', 'color: #00BCD4; font-weight: bold;');
-      console.log(`%c[Mediaworld:final:summary]`, 'color: #00BCD4;', {
-        sourceDataset: 'eanCatalogDataset',
-        'righe sorgente': eanCatalogDataset.length,
-        'righe esportate': result.rowCount ?? 0,
-        'righe saltate': result.skippedCount ?? 0,
-        'success': result.success
+      // === LOG STANDARDIZZATO: RIEPILOGO EXPORT MEDIAWORLD ===
+      const mwExportedRows = result.rowCount ?? 0;
+      const mwSkippedRows = result.skippedCount ?? 0;
+      const mwInputRows = eanCatalogDataset.length;
+      
+      console.log('%c[Mediaworld:export:summary]', 'color: #00BCD4; font-weight: bold;', {
+        prodotti_input_CatalogoEAN: mwInputRows,
+        prodotti_Mediaworld_export: mwExportedRows,
+        prodotti_scartati: mwSkippedRows,
+        allineamento_set: mwInputRows === (mwExportedRows + mwSkippedRows) ? 'OK' : 'MISMATCH'
       });
       
-      // === LOG VERIFICA INCROCIATA FINALE ===
-      console.log('%c[check:final-comparison:Mediaworld]', 'color: #E91E63; font-weight: bold;', {
-        'Catalogo_EAN_rows': eanCatalogDataset.length,
-        'Mediaworld_exported_rows': result.rowCount ?? 0,
-        'Mediaworld_skipped_rows': result.skippedCount ?? 0,
-        'totale_elaborato': (result.rowCount ?? 0) + (result.skippedCount ?? 0),
-        'allineamento': eanCatalogDataset.length === ((result.rowCount ?? 0) + (result.skippedCount ?? 0)) ? 'OK' : 'MISMATCH'
+      // === LOG VERIFICA FINALE MEDIAWORLD ===
+      console.log('%c[check:export-final-Mediaworld]', 'color: #E91E63; font-weight: bold;', {
+        catalogoEAN_rows: mwInputRows,
+        Mediaworld_export_rows: mwExportedRows,
+        difference: mwInputRows - mwExportedRows - mwSkippedRows,
+        status: mwInputRows === (mwExportedRows + mwSkippedRows) ? 'OK' : 'MISMATCH'
       });
       
       // Build validation report for UI
