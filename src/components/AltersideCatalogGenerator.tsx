@@ -2127,44 +2127,32 @@ const AltersideCatalogGenerator: React.FC = () => {
           rowErrors.push(`Riga ${index + 1}: Quantità non valida (${quantity})`);
         }
         
-        // Same price calculation as onExportEAN
-        const hasBest = Number.isFinite(record.CustBestPrice) && record.CustBestPrice > 0;
-        const hasListPrice = Number.isFinite(record.ListPrice) && record.ListPrice > 0;
-        const surchargeValue = (Number.isFinite(record.Surcharge) && record.Surcharge >= 0) ? record.Surcharge : 0;
+        // =====================================================================
+        // IMPORTANTE: I prezzi ePrice derivano DIRETTAMENTE dal Catalogo EAN.
+        // NON ricalcoliamo i prezzi. Usiamo il valore di "Prezzo Finale" già calcolato.
+        // La conversione avviene da stringa con virgola (es. "175,99") a numero (175.99).
+        // =====================================================================
         
-        let baseCents = 0;
+        // Parse price from EAN catalog "Prezzo Finale" field (string with comma -> number with dot)
+        const prezzoFinaleRaw = record['Prezzo Finale'];
+        const toPriceNumber = (raw: unknown): number | null => {
+          if (raw == null) return null;
+          const s = String(raw).trim().replace(',', '.');
+          if (!s) return null;
+          const n = Number(s);
+          return Number.isFinite(n) ? n : null;
+        };
         
-        if (hasBest) {
-          baseCents = Math.round((record.CustBestPrice + surchargeValue) * 100);
-        } else if (hasListPrice) {
-          baseCents = Math.round(record.ListPrice * 100);
-        }
+        const prezzoFinaleNumber = toPriceNumber(prezzoFinaleRaw);
         
-        // Validate base price exists
-        if (baseCents === 0) {
-          rowErrors.push(`Riga ${index + 1}: Prezzo base mancante (SKU: ${sku})`);
-        }
-        
-        const shipC = toCents(feeConfig.shippingCost);
-        const ivaR = parsePercentToRate(22, 22);
-        const feeDR = parseRate(record.FeeDeRev, 1.05);
-        const feeMP = parseRate(record['Fee Marketplace'], 1.07);
-        
-        const afterShippingCents = baseCents + shipC;
-        const ivatoCents = applyRateCents(afterShippingCents, ivaR);
-        const withFeDR = applyRateCents(ivatoCents, feeDR);
-        const subtotalCents = applyRateCents(withFeDR, feeMP);
-        const prezzoFinaleCents = ceilToComma99(subtotalCents);
-        const prezzoFinaleFormatted = formatCents(prezzoFinaleCents);
-        
-        // Validate final price format (should end with ,99)
-        if (!prezzoFinaleFormatted || !/^\d+,99$/.test(prezzoFinaleFormatted)) {
-          validationWarnings.push(`Riga ${index + 1}: Prezzo finale non termina con ,99 (${prezzoFinaleFormatted})`);
+        // Validate price exists and is valid
+        if (prezzoFinaleNumber === null || prezzoFinaleNumber <= 0) {
+          rowErrors.push(`Riga ${index + 1}: Prezzo Finale mancante o non valido (SKU: ${sku}, raw: ${prezzoFinaleRaw})`);
         }
         
         // Validate final price is reasonable (between 1€ and 100000€)
-        if (prezzoFinaleCents < 100 || prezzoFinaleCents > 10000000) {
-          rowErrors.push(`Riga ${index + 1}: Prezzo finale fuori range (${prezzoFinaleFormatted})`);
+        if (prezzoFinaleNumber !== null && (prezzoFinaleNumber < 1 || prezzoFinaleNumber > 100000)) {
+          rowErrors.push(`Riga ${index + 1}: Prezzo finale fuori range (${prezzoFinaleNumber})`);
         }
         
         // If there are critical errors for this row, skip it
@@ -2178,7 +2166,7 @@ const AltersideCatalogGenerator: React.FC = () => {
           sku,                                // sku
           ean,                                // product-id
           'EAN',                              // product-id-type
-          prezzoFinaleFormatted,              // price
+          prezzoFinaleNumber ?? 0,            // price (NUMBER with dot, e.g., 175.99)
           quantity,                           // quantity
           11,                                 // state
           prepDays,                           // fulfillment-latency
@@ -2231,15 +2219,15 @@ const AltersideCatalogGenerator: React.FC = () => {
           }
         }
         
-        // Force price (column D) to text format to preserve comma format
+        // Format price (column D) as NUMBER with 2 decimal places (0.00)
+        // NON forzare a testo - deve essere un numero con punto decimale
         const priceCol = 3; // Column D (price)
         for (let R = 1; R <= range.e.r; R++) {
           const addr = XLSX.utils.encode_cell({ r: R, c: priceCol });
           const cell = ws[addr];
-          if (cell) {
-            cell.v = (cell.v ?? '').toString();
-            cell.t = 's';
-            cell.z = '@';
+          if (cell && typeof cell.v === 'number') {
+            cell.t = 'n'; // number type
+            cell.z = '0.00'; // format with 2 decimal places
             ws[addr] = cell;
           }
         }
