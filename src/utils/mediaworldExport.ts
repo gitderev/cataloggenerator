@@ -315,10 +315,9 @@ export async function exportMediaworldCatalog({
     // Log per debug: tracciamento conversione prezzi
     let debugLogCount = 0;
     
-    // === LOG ESTESO: EXPORT MEDIAWORLD - CONTEGGI ===
-    console.log('%c[Mediaworld:counts] === INIZIO EXPORT MEDIAWORLD ===', 'color: #00BCD4; font-weight: bold; font-size: 14px;');
-    console.log(`%c[Mediaworld:counts]`, 'color: #00BCD4;', { 
-      'prodotti in input (eanCatalogDataset)': processedData.length,
+    // === LOG INIZIO EXPORT MEDIAWORLD (interno utility) ===
+    console.log('%c[Mediaworld:util:start]', 'color: #00BCD4;', { 
+      rows_input: processedData.length,
       timestamp: new Date().toISOString()
     });
     
@@ -494,21 +493,12 @@ export async function exportMediaworldCatalog({
     // Check if we have valid data rows after validation
     const validRowCount = dataRows.length - 1; // Exclude header row
     
-    // === LOG ESTESO: RIEPILOGO EXPORT MEDIAWORLD ===
-    console.log('%c[Mediaworld:export:summary] === EXPORT COMPLETATO ===', 'color: #00BCD4; font-weight: bold;');
-    console.log(`%c[Mediaworld:export:summary]`, 'color: #00BCD4;', {
-      'righe sorgente': processedData.length,
-      'righe esportate': validRowCount,
-      'righe saltate': skippedCount,
-      'differenza': processedData.length - validRowCount - skippedCount
-    });
-    
-    // === LOG VERIFICA INCROCIATA POST-EXPORT ===
-    console.log('%c[check:comparison-summary:Mediaworld]', 'color: #E91E63; font-weight: bold;', {
-      'prodotti_input (eanCatalogDataset)': processedData.length,
-      'prodotti_Mediaworld_export': validRowCount,
-      'prodotti_scartati': skippedCount,
-      'allineamento_set': processedData.length === (validRowCount + skippedCount) ? 'OK' : 'MISMATCH'
+    // === LOG RIEPILOGO INTERNO UTILITY MEDIAWORLD ===
+    console.log('%c[Mediaworld:util:complete]', 'color: #00BCD4;', {
+      rows_input: processedData.length,
+      rows_exported: validRowCount,
+      rows_skipped: skippedCount,
+      allineamento: processedData.length === (validRowCount + skippedCount) ? 'OK' : 'MISMATCH'
     });
     
     if (validRowCount === 0) {
