@@ -2329,14 +2329,38 @@ const AltersideCatalogGenerator: React.FC = () => {
       });
       
       if (result.success) {
-        toast({
-          title: "Export Mediaworld completato",
-          description: `File mediaworld-offers-*.xlsx generato con ${result.rowCount} righe`
-        });
+        // Show success with validation summary if there were skipped rows
+        if (result.skippedCount && result.skippedCount > 0) {
+          toast({
+            title: "Export Mediaworld completato con avvisi",
+            description: `${result.rowCount} righe esportate, ${result.skippedCount} righe scartate per errori di validazione`
+          });
+          
+          // Log validation errors for debugging
+          if (result.validationErrors && result.validationErrors.length > 0) {
+            console.warn('Mediaworld validation errors:', result.validationErrors);
+          }
+        } else {
+          toast({
+            title: "Export Mediaworld completato",
+            description: `File mediaworld-offers-*.xlsx generato con ${result.rowCount} righe`
+          });
+        }
       } else {
+        // Show error with validation details
+        let errorDescription = result.error || "Errore sconosciuto";
+        
+        if (result.validationErrors && result.validationErrors.length > 0) {
+          const firstErrors = result.validationErrors.slice(0, 3);
+          const errorDetails = firstErrors.map(e => `Riga ${e.row}: ${e.field} - ${e.reason}`).join('; ');
+          errorDescription += `. Primi errori: ${errorDetails}`;
+          
+          console.error('Mediaworld validation errors:', result.validationErrors);
+        }
+        
         toast({
           title: "Errore export Mediaworld",
-          description: result.error || "Errore sconosciuto",
+          description: errorDescription,
           variant: "destructive"
         });
       }

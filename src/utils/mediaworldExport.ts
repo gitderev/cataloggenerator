@@ -62,11 +62,24 @@ interface MediaworldExportParams {
   prepDays: number;
 }
 
+interface ValidationError {
+  row: number;
+  sku: string;
+  field: string;
+  reason: string;
+}
+
 export async function exportMediaworldCatalog({
   processedData,
   feeConfig,
   prepDays
-}: MediaworldExportParams): Promise<{ success: boolean; error?: string; rowCount?: number }> {
+}: MediaworldExportParams): Promise<{ 
+  success: boolean; 
+  error?: string; 
+  rowCount?: number;
+  validationErrors?: ValidationError[];
+  skippedCount?: number;
+}> {
   try {
     // Filter EAN data - same logic as EAN export
     const eanFilteredData = processedData.filter(record => record.EAN && record.EAN.length >= 12);
@@ -74,6 +87,10 @@ export async function exportMediaworldCatalog({
     if (eanFilteredData.length === 0) {
       return { success: false, error: 'Nessuna riga valida con EAN da esportare' };
     }
+    
+    // Validation arrays
+    const validationErrors: ValidationError[] = [];
+    let skippedCount = 0;
 
     // Load template from public folder
     const templateResponse = await fetch('/mediaworld-template.xlsx');
@@ -98,7 +115,59 @@ export async function exportMediaworldCatalog({
     dataRows.push(MEDIAWORLD_HEADERS_TECHNICAL);
     
     // Data rows with product mapping
-    eanFilteredData.forEach((record) => {
+    eanFilteredData.forEach((record, index) => {
+      const rowErrors: string[] = [];
+      const sku = record.ManufPartNr || '';
+      const ean = record.EAN || '';
+      
+      // === VALIDATION: Required fields ===
+      
+      // 1. SKU offerta (ManufPartNr) - Required
+      if (!sku || sku.trim() === '') {
+        validationErrors.push({
+          row: index + 1,
+          sku: sku || 'N/A',
+          field: 'SKU offerta',
+          reason: 'ManufPartNr mancante o vuoto'
+        });
+        rowErrors.push('SKU mancante');
+      } else if (sku.length > 40) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'SKU offerta',
+          reason: `SKU troppo lungo (${sku.length} caratteri, max 40)`
+        });
+        rowErrors.push('SKU troppo lungo');
+      } else if (sku.includes('/')) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'SKU offerta',
+          reason: 'SKU contiene carattere "/" non accettato'
+        });
+        rowErrors.push('SKU contiene /');
+      }
+      
+      // 2. ID Prodotto (EAN) - Required, must be 12-14 digits
+      if (!ean || ean.trim() === '') {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'ID Prodotto',
+          reason: 'EAN mancante o vuoto'
+        });
+        rowErrors.push('EAN mancante');
+      } else if (!/^\d{12,14}$/.test(ean)) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'ID Prodotto',
+          reason: `EAN non valido: "${ean}" (deve essere 12-14 cifre)`
+        });
+        rowErrors.push('EAN non valido');
+      }
+      
       // Calculate prices using the same logic as EAN export
       const hasBest = Number.isFinite(record.CustBestPrice) && record.CustBestPrice > 0;
       const hasListPrice = Number.isFinite(record.ListPrice) && record.ListPrice > 0;
@@ -112,8 +181,34 @@ export async function exportMediaworldCatalog({
         baseCents = Math.round(record.ListPrice * 100);
       }
       
-      // Skip rows with no valid price
-      if (baseCents === 0) return;
+      // 3. Price validation - must have valid base price
+      if (baseCents === 0) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'Prezzo',
+          reason: 'Nessun prezzo valido (CustBestPrice o ListPrice)'
+        });
+        rowErrors.push('Prezzo mancante');
+      }
+      
+      // 4. Quantity validation - must be positive integer
+      const quantity = record.ExistingStock;
+      if (!Number.isFinite(quantity) || quantity < 0) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'Quantità',
+          reason: `Quantità non valida: ${quantity}`
+        });
+        rowErrors.push('Quantità non valida');
+      }
+      
+      // Skip rows with critical errors
+      if (rowErrors.length > 0) {
+        skippedCount++;
+        return;
+      }
       
       const shipC = toCents(feeConfig.shippingCost);
       const ivaR = parsePercentToRate(22, 22);
@@ -155,8 +250,41 @@ export async function exportMediaworldCatalog({
         listPriceConFeeInt = Math.max(candidato_ceil, minimo_consentito);
       }
       
-      // Format Prezzo Finale with comma decimal (e.g., "34,99")
+      // 5. Final price validation - must end with ,99
       const prezzoFinaleFormatted = formatCents(prezzoFinaleCents);
+      if (!/^\d+,99$/.test(prezzoFinaleFormatted)) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'Prezzo scontato',
+          reason: `Prezzo finale non termina con ,99: "${prezzoFinaleFormatted}"`
+        });
+        // This is a warning, don't skip the row
+      }
+      
+      // 6. ListPrice con Fee validation - must be positive
+      if (!Number.isFinite(listPriceConFeeInt) || listPriceConFeeInt <= 0) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: "Prezzo dell'offerta",
+          reason: `ListPrice con Fee non valido: ${listPriceConFeeInt}`
+        });
+        skippedCount++;
+        return;
+      }
+      
+      // 7. Price range validation (between 1€ and 100000€)
+      if (prezzoFinaleCents < 100 || prezzoFinaleCents > 10000000) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'Prezzo scontato',
+          reason: `Prezzo finale fuori range (${prezzoFinaleFormatted}): deve essere tra 1€ e 100000€`
+        });
+        skippedCount++;
+        return;
+      }
       
       // Build row according to mapping
       const row: (string | number)[] = [
@@ -186,6 +314,28 @@ export async function exportMediaworldCatalog({
       
       dataRows.push(row);
     });
+    
+    // Check if we have valid data rows after validation
+    const validRowCount = dataRows.length - 2; // Exclude header rows
+    
+    if (validRowCount === 0) {
+      return { 
+        success: false, 
+        error: `Nessuna riga valida dopo la validazione. ${skippedCount} righe scartate.`,
+        validationErrors,
+        skippedCount
+      };
+    }
+    
+    // Log validation summary
+    if (validationErrors.length > 0) {
+      console.warn('Mediaworld export validation:', {
+        totalInput: eanFilteredData.length,
+        validOutput: validRowCount,
+        skipped: skippedCount,
+        errors: validationErrors.length
+      });
+    }
     
     // Create new workbook with 3 sheets
     const wb = XLSX.utils.book_new();
@@ -277,14 +427,17 @@ export async function exportMediaworldCatalog({
     
     return { 
       success: true, 
-      rowCount: dataRows.length - 2 // Exclude header rows
+      rowCount: validRowCount,
+      validationErrors: validationErrors.length > 0 ? validationErrors : undefined,
+      skippedCount: skippedCount > 0 ? skippedCount : undefined
     };
     
   } catch (error) {
     console.error('Errore export Mediaworld:', error);
     return { 
       success: false, 
-      error: error instanceof Error ? error.message : 'Errore sconosciuto durante export' 
+      error: error instanceof Error ? error.message : 'Errore sconosciuto durante export',
+      validationErrors: []
     };
   }
 }
