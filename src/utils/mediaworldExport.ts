@@ -366,16 +366,7 @@ export async function exportMediaworldCatalog({
         return;
       }
       
-      if (sku.includes('/')) {
-        validationErrors.push({
-          row: index + 1,
-          sku,
-          field: 'SKU offerta',
-          reason: 'SKU contiene carattere "/" non accettato'
-        });
-        skippedCount++;
-        return;
-      }
+      // SKU con "/" sono ora accettati (es. KVR16N11/8, SNA-DC2/35)
       
       // === GET PRICES FROM ALREADY CALCULATED EAN DATA ===
       // IMPORTANTE: NON ricalcoliamo i prezzi, usiamo DIRETTAMENTE quelli già calcolati nel catalogo EAN.

@@ -2320,9 +2320,9 @@ const AltersideCatalogGenerator: React.FC = () => {
           rowErrors.push(`Riga ${index + 1}: Prezzo Finale mancante o non valido (SKU: ${sku}, raw: ${prezzoFinaleRaw})`);
         }
         
-        // Validate final price is reasonable (between 1€ and 100000€)
-        if (prezzoFinaleNumber !== null && (prezzoFinaleNumber < 1 || prezzoFinaleNumber > 100000)) {
-          rowErrors.push(`Riga ${index + 1}: Prezzo finale fuori range (${prezzoFinaleNumber})`);
+        // Warning per prezzi molto alti (informativo, non bloccante)
+        if (prezzoFinaleNumber !== null && prezzoFinaleNumber > 100000) {
+          validationWarnings.push(`Riga ${index + 1}: Prezzo finale molto alto (${prezzoFinaleNumber}€) - verificare correttezza`);
         }
         
         // If there are critical errors for this row, skip it
