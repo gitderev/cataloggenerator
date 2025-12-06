@@ -61,7 +61,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      add_self_as_admin: { Args: never; Returns: boolean }
     }
     Enums: {
       [_ in never]: never
