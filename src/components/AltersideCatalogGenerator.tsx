@@ -433,6 +433,9 @@ const AltersideCatalogGenerator: React.FC = () => {
   // Base catalog (before override) and final dataset
   const [eanCatalogBase, setEanCatalogBase] = useState<any[]>([]);
 
+  // Override persistence state
+  const overrideLoadedRef = useRef(false);
+
   // Mapping persistence state
   const [mappingInfo, setMappingInfo] = useState<{ filename: string; uploadedAt: string } | null>(null);
   const mappingLoadedRef = useRef(false);
@@ -479,6 +482,51 @@ const AltersideCatalogGenerator: React.FC = () => {
     }
   };
 
+  // Persist override file to Supabase Storage
+  const persistOverrideFile = async (file: File) => {
+    try {
+      const { error } = await supabase.storage
+        .from('mapping-files')
+        .upload('latest/override_prodotti.xlsx', file, { upsert: true });
+      
+      if (error) {
+        console.error('Errore upload override:', error);
+        toast({
+          title: "Errore salvataggio override",
+          description: "Impossibile salvare il file override sul server.",
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      console.log('File override persistito su Storage');
+    } catch (err) {
+      console.error('Errore persistOverrideFile:', err);
+      toast({
+        title: "Errore salvataggio override",
+        description: "Impossibile salvare il file override sul server.",
+        variant: "destructive"
+      });
+    }
+  };
+
+  // Delete override file from Supabase Storage
+  const deleteOverrideFileFromStorage = async () => {
+    try {
+      const { error } = await supabase.storage
+        .from('mapping-files')
+        .remove(['latest/override_prodotti.xlsx']);
+      
+      if (error) {
+        console.error('Errore eliminazione override da storage:', error);
+      } else {
+        console.log('File override eliminato da Storage');
+      }
+    } catch (err) {
+      console.error('Errore deleteOverrideFileFromStorage:', err);
+    }
+  };
+
   // Load mapping file from storage on mount
   useEffect(() => {
     if (mappingLoadedRef.current) return;
@@ -520,6 +568,59 @@ const AltersideCatalogGenerator: React.FC = () => {
     };
 
     loadMappingFromStorage();
+  }, []);
+
+  // Load override file from storage on mount
+  useEffect(() => {
+    if (overrideLoadedRef.current) return;
+    overrideLoadedRef.current = true;
+
+    const loadOverrideFromStorage = async () => {
+      try {
+        const { data, error } = await supabase.storage
+          .from('mapping-files')
+          .download('latest/override_prodotti.xlsx');
+        
+        if (error || !data) {
+          // File doesn't exist, nothing to do
+          console.log('Nessun file override salvato trovato');
+          return;
+        }
+        
+        const file = new File([data], 'override_prodotti.xlsx', { 
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+        });
+        
+        // Parse the file
+        const buffer = await file.arrayBuffer();
+        const result = parseOverrideFile(buffer);
+        
+        setOverrideState({
+          file,
+          filename: 'override_prodotti.xlsx',
+          uploadedAt: new Date(),
+          index: result.index,
+          errors: result.errors,
+          disabled: false,
+          validCount: result.validCount,
+          invalidCount: result.invalidCount,
+          lastApplyStats: null
+        });
+        
+        if (result.success && result.index) {
+          toast({
+            title: "Override caricato",
+            description: `File override ripristinato: ${result.validCount} righe valide`
+          });
+        } else {
+          console.warn('File override caricato ma non valido:', result.errors);
+        }
+      } catch (err) {
+        console.error('Errore caricamento override:', err);
+      }
+    };
+
+    loadOverrideFromStorage();
   }, []);
 
   const [processingState, setProcessingState] = useState<'idle' | 'validating' | 'ready' | 'running' | 'completed' | 'failed'>('idle');
@@ -3183,6 +3284,9 @@ const AltersideCatalogGenerator: React.FC = () => {
       });
       
       if (result.success && result.index) {
+        // Persist to Supabase Storage
+        await persistOverrideFile(file);
+        
         toast({
           title: "File override caricato",
           description: `${result.validCount} righe valide, ${result.invalidCount} scartate`
@@ -3225,7 +3329,10 @@ const AltersideCatalogGenerator: React.FC = () => {
     });
   };
   
-  const handleRemoveOverrideFile = () => {
+  const handleRemoveOverrideFile = async () => {
+    // Delete from Supabase Storage
+    await deleteOverrideFileFromStorage();
+    
     setOverrideState({
       file: null,
       filename: null,
