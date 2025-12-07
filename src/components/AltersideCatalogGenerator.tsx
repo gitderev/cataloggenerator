@@ -3737,13 +3737,33 @@ const AltersideCatalogGenerator: React.FC = () => {
                                !overrideState.disabled;
 
   const processEANPrefill = async () => {
-    if (!files.eanMapping.file || !files.material.file) {
+    // Verifica file Material
+    if (!files.material.file) {
       toast({
-        title: "File mancanti",
-        description: "Carica sia il file Material che il file di mapping",
+        title: "File Material mancante",
+        description: "Carica il file Material prima di eseguire il pre-fill EAN.",
         variant: "destructive"
       });
       return;
+    }
+    
+    // Verifica file mapping: controlla sia file in memoria sia mapping salvato (mappingInfo)
+    if (!files.eanMapping.file) {
+      // Se non c'è il file in memoria, controlla se esiste un mapping salvato
+      if (mappingInfo) {
+        // Mapping già configurato e salvato in precedenza: considera il prefill come già disponibile
+        console.log('[processEANPrefill] Mapping già salvato (mappingInfo), prefill considerato disponibile');
+        setPrefillState(prev => ({ ...prev, status: 'done' }));
+        return;
+      } else {
+        // Nessun mapping configurato
+        toast({
+          title: "File di mapping mancante",
+          description: "Carica un file SKU↔EAN oppure esegui la pipeline senza pre-fill EAN.",
+          variant: "destructive"
+        });
+        return;
+      }
     }
     
     setPrefillState(prev => ({ ...prev, status: 'running' }));
@@ -4220,20 +4240,22 @@ const AltersideCatalogGenerator: React.FC = () => {
       
       // =====================================================================
       // STEP 2: EAN Prefill (se non già completato)
+      // Gestione: file mapping in memoria, mapping salvato (mappingInfo), o nessun mapping
       // =====================================================================
       const currentPrefillState = prefillStateRef.current;
       const currentFilesForPrefill = filesRef.current;
       
       if (currentPrefillState.status === 'done') {
+        // Prefill già completato in questa sessione
         console.log('[Pipeline Master] Step 2 saltato: prefill già completato');
         setPipelineStatus('EAN Prefill già completato, proseguo…');
         setPipelineProgress(50);
         setPipelineStepLabel('EAN Prefill già completato. Elaborazione pipeline EAN…');
       } else if (currentFilesForPrefill.eanMapping.file && currentFilesForPrefill.material.file) {
-        // File mapping presente, eseguo il prefill
+        // File mapping presente in memoria, eseguo il prefill
         setPipelineStatus('EAN Prefill in corso…');
         setPipelineStepLabel('EAN Prefill in corso…');
-        console.log('[Pipeline Master] Step 2: processEANPrefill');
+        console.log('[Pipeline Master] Step 2: processEANPrefill (file in memoria)');
         
         try {
           await processEANPrefill();
@@ -4271,11 +4293,20 @@ const AltersideCatalogGenerator: React.FC = () => {
           console.error('[Pipeline Master] Errore EAN Prefill:', errorMessage);
           throw new Error(`EAN Prefill fallito o interrotto: ${errorMessage}`);
         }
-      } else {
-        console.log('[Pipeline Master] Step 2 saltato: file mapping non presente');
-        setPipelineStatus('Nessun file mapping, proseguo…');
+      } else if (!currentFilesForPrefill.eanMapping.file && mappingInfo) {
+        // Mapping già salvato in precedenza (mappingInfo presente) ma non in memoria
+        // Considera il prefill come già disponibile e prosegui
+        console.log('[Pipeline Master] Step 2: mapping salvato (mappingInfo), prefill considerato già disponibile');
+        setPrefillState(prev => ({ ...prev, status: 'done' }));
+        setPipelineStatus('Mapping EAN già configurato, proseguo…');
         setPipelineProgress(50);
-        setPipelineStepLabel('File mapping assente, prefill saltato. Elaborazione pipeline EAN…');
+        setPipelineStepLabel('Mapping EAN già salvato. Elaborazione pipeline EAN…');
+      } else {
+        // Nessun mapping configurato (né in memoria né salvato)
+        console.log('[Pipeline Master] Step 2 saltato: nessun mapping configurato');
+        setPipelineStatus('Nessun mapping EAN, proseguo senza prefill…');
+        setPipelineProgress(50);
+        setPipelineStepLabel('Nessun mapping EAN configurato, prefill saltato. Elaborazione pipeline EAN…');
       }
       
       // =====================================================================
