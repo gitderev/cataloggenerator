@@ -3737,8 +3737,25 @@ const AltersideCatalogGenerator: React.FC = () => {
                                !overrideState.disabled;
 
   const processEANPrefill = async () => {
-    // Verifica file Material
-    if (!files.material.file) {
+    // Fonte di verità per Material: usa filesRef.current per coerenza con l'UI
+    // L'UI mostra "Caricato" quando files.material.status === 'valid'
+    // Usiamo filesRef.current per evitare closure stale in contesti async
+    const currentFiles = filesRef.current;
+    
+    // Debug: log per diagnosticare lo stato del Material
+    console.log("DEBUG Material presence", { 
+      filesMaterialFile: !!currentFiles.material.file, 
+      filesMaterialStatus: currentFiles.material.status,
+      mappingInfo: !!mappingInfo,
+      eanMappingFile: !!currentFiles.eanMapping.file
+    });
+    
+    // hasMaterial: true se file presente E status valido (coerente con badge "Caricato" nella UI)
+    const hasMaterial = !!currentFiles.material.file && 
+                        (currentFiles.material.status === 'valid' || currentFiles.material.status === 'warning');
+    
+    // Verifica file Material usando la stessa logica dell'UI
+    if (!hasMaterial) {
       toast({
         title: "File Material mancante",
         description: "Carica il file Material prima di eseguire il pre-fill EAN.",
@@ -3748,7 +3765,7 @@ const AltersideCatalogGenerator: React.FC = () => {
     }
     
     // Verifica file mapping: controlla sia file in memoria sia mapping salvato (mappingInfo)
-    if (!files.eanMapping.file) {
+    if (!currentFiles.eanMapping.file) {
       // Se non c'è il file in memoria, controlla se esiste un mapping salvato
       if (mappingInfo) {
         // Mapping già configurato e salvato in precedenza: considera il prefill come già disponibile
@@ -3773,8 +3790,8 @@ const AltersideCatalogGenerator: React.FC = () => {
     }));
     
     try {
-      // Read mapping file as text
-      const mappingText = await files.eanMapping.file.text();
+      // Read mapping file as text (usa currentFiles per coerenza)
+      const mappingText = await currentFiles.eanMapping.file!.text();
       
       // Validate header (case-insensitive)
       const lines = mappingText.split('\n');
@@ -3784,7 +3801,7 @@ const AltersideCatalogGenerator: React.FC = () => {
         throw new Error('Header richiesto: mpn;ean');
       }
       
-      const materialData = files.material.file.data;
+      const materialData = currentFiles.material.file!.data;
       
       // Diagnostic: Count EAN before pre-fill
       const countEANNonVuoti_before = materialData.filter((row: any) => {
@@ -4245,14 +4262,29 @@ const AltersideCatalogGenerator: React.FC = () => {
       const currentPrefillState = prefillStateRef.current;
       const currentFilesForPrefill = filesRef.current;
       
+      // hasMaterial: coerente con l'UI (badge "Caricato")
+      const hasMaterial = !!currentFilesForPrefill.material.file && 
+                          (currentFilesForPrefill.material.status === 'valid' || 
+                           currentFilesForPrefill.material.status === 'warning');
+      
+      // Debug: log per diagnosticare lo stato nella pipeline master
+      console.log('[Pipeline Master] Step 2 - Material presence check:', {
+        hasMaterial,
+        materialFile: !!currentFilesForPrefill.material.file,
+        materialStatus: currentFilesForPrefill.material.status,
+        eanMappingFile: !!currentFilesForPrefill.eanMapping.file,
+        mappingInfo: !!mappingInfo,
+        prefillStatus: currentPrefillState.status
+      });
+      
       if (currentPrefillState.status === 'done') {
         // Prefill già completato in questa sessione
         console.log('[Pipeline Master] Step 2 saltato: prefill già completato');
         setPipelineStatus('EAN Prefill già completato, proseguo…');
         setPipelineProgress(50);
         setPipelineStepLabel('EAN Prefill già completato. Elaborazione pipeline EAN…');
-      } else if (currentFilesForPrefill.eanMapping.file && currentFilesForPrefill.material.file) {
-        // File mapping presente in memoria, eseguo il prefill
+      } else if (currentFilesForPrefill.eanMapping.file && hasMaterial) {
+        // File mapping presente in memoria e Material valido, eseguo il prefill
         setPipelineStatus('EAN Prefill in corso…');
         setPipelineStepLabel('EAN Prefill in corso…');
         console.log('[Pipeline Master] Step 2: processEANPrefill (file in memoria)');
