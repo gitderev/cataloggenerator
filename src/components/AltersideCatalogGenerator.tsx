@@ -4230,39 +4230,47 @@ const AltersideCatalogGenerator: React.FC = () => {
         setPipelineProgress(50);
         setPipelineStepLabel('EAN Prefill già completato. Elaborazione pipeline EAN…');
       } else if (currentFilesForPrefill.eanMapping.file && currentFilesForPrefill.material.file) {
+        // File mapping presente, eseguo il prefill
         setPipelineStatus('EAN Prefill in corso…');
         setPipelineStepLabel('EAN Prefill in corso…');
         console.log('[Pipeline Master] Step 2: processEANPrefill');
         
-        await processEANPrefill();
-        
-        // Attendi che il prefill sia completato
-        await new Promise<void>((resolve, reject) => {
-          let attempts = 0;
-          const maxAttempts = 120; // 60 secondi
-          const checkInterval = 500;
+        try {
+          await processEANPrefill();
           
-          const waitForPrefill = setInterval(() => {
-            attempts++;
-            const currentState = prefillStateRef.current;
+          // Attendi che il prefill sia completato
+          await new Promise<void>((resolve, reject) => {
+            let attempts = 0;
+            const maxAttempts = 120; // 60 secondi
+            const checkInterval = 500;
             
-            if (currentState.status === 'done') {
-              clearInterval(waitForPrefill);
-              resolve();
-            } else if (currentState.status === 'idle' && attempts > 5) {
-              // Se torna a idle dopo alcuni tentativi, potrebbe essere un errore
-              clearInterval(waitForPrefill);
-              reject(new Error('EAN Prefill fallito o interrotto'));
-            } else if (attempts >= maxAttempts) {
-              clearInterval(waitForPrefill);
-              reject(new Error('Timeout: EAN Prefill non completato entro 60 secondi'));
-            }
-          }, checkInterval);
-        });
-        
-        console.log('[Pipeline Master] Step 2 completato: prefill eseguito');
-        setPipelineProgress(50);
-        setPipelineStepLabel('EAN Prefill completato. Elaborazione pipeline EAN…');
+            const waitForPrefill = setInterval(() => {
+              attempts++;
+              const currentState = prefillStateRef.current;
+              
+              if (currentState.status === 'done') {
+                clearInterval(waitForPrefill);
+                resolve();
+              } else if (currentState.status === 'idle' && attempts > 10) {
+                // Se torna a idle dopo diversi tentativi, il prefill è fallito
+                clearInterval(waitForPrefill);
+                reject(new Error('EAN Prefill fallito o interrotto'));
+              } else if (attempts >= maxAttempts) {
+                clearInterval(waitForPrefill);
+                reject(new Error('Timeout: EAN Prefill non completato entro 60 secondi'));
+              }
+            }, checkInterval);
+          });
+          
+          console.log('[Pipeline Master] Step 2 completato: prefill eseguito');
+          setPipelineProgress(50);
+          setPipelineStepLabel('EAN Prefill completato. Elaborazione pipeline EAN…');
+        } catch (prefillError) {
+          // Errore reale durante il prefill con file mapping presente: blocca la pipeline
+          const errorMessage = prefillError instanceof Error ? prefillError.message : 'Errore sconosciuto';
+          console.error('[Pipeline Master] Errore EAN Prefill:', errorMessage);
+          throw new Error(`EAN Prefill fallito o interrotto: ${errorMessage}`);
+        }
       } else {
         console.log('[Pipeline Master] Step 2 saltato: file mapping non presente');
         setPipelineStatus('Nessun file mapping, proseguo…');
