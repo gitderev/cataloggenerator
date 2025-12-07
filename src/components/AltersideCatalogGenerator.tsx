@@ -894,6 +894,10 @@ const AltersideCatalogGenerator: React.FC = () => {
   // State for saving preparation days
   const [isSavingPrepDays, setIsSavingPrepDays] = useState(false);
 
+  // Pipeline Master state
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [pipelineStatus, setPipelineStatus] = useState<string>('');
+
   const workerRef = useRef<Worker | null>(null);
 
   // FTP import loading state
@@ -906,6 +910,18 @@ const AltersideCatalogGenerator: React.FC = () => {
     results?: Array<{ filename: string; uploaded: boolean; error?: string }>;
   }
   const [sftpUploadStatus, setSftpUploadStatus] = useState<SftpUploadStatus>({ phase: 'idle', message: '' });
+
+  // Refs for pipeline master to track current state in closures
+  const filesRef = useRef(files);
+  const prefillStateRef = useRef(prefillState);
+  const processingStateRef = useRef(processingState);
+  const sftpUploadStatusRef = useRef(sftpUploadStatus);
+  
+  // Keep refs in sync with state
+  useEffect(() => { filesRef.current = files; }, [files]);
+  useEffect(() => { prefillStateRef.current = prefillState; }, [prefillState]);
+  useEffect(() => { processingStateRef.current = processingState; }, [processingState]);
+  useEffect(() => { sftpUploadStatusRef.current = sftpUploadStatus; }, [sftpUploadStatus]);
 
   const isProcessing = processingState === 'running';
   const isCompleted = processingState === 'completed';
@@ -4149,6 +4165,189 @@ const AltersideCatalogGenerator: React.FC = () => {
     }
   };
 
+  // =====================================================================
+  // PIPELINE MASTER: Esecuzione sequenziale completa
+  // Orchestrazione: handleFtpImport → processEANPrefill → processDataPipeline('EAN') → downloadExcel('ean')
+  // =====================================================================
+  const handleFullPipeline = async () => {
+    if (pipelineRunning) return;
+    
+    setPipelineRunning(true);
+    setPipelineStatus('');
+    
+    try {
+      // =====================================================================
+      // STEP 1: Import FTP
+      // =====================================================================
+      setPipelineStatus('Import FTP in corso…');
+      console.log('[Pipeline Master] Step 1: handleFtpImport');
+      
+      // Call handleFtpImport and wait for completion
+      await handleFtpImport();
+      
+      // Wait for files to become valid (using refs to get current state)
+      await new Promise<void>((resolve, reject) => {
+        let attempts = 0;
+        const maxAttempts = 120; // 60 secondi
+        const checkInterval = 500;
+        
+        const waitForCompletion = setInterval(() => {
+          attempts++;
+          const currentFiles = filesRef.current;
+          
+          // Check if files are now valid
+          if (currentFiles.material.status === 'valid' && 
+              (currentFiles.stock.status === 'valid' || currentFiles.stock.status === 'warning') &&
+              (currentFiles.price.status === 'valid' || currentFiles.price.status === 'warning')) {
+            clearInterval(waitForCompletion);
+            resolve();
+          } else if (attempts >= maxAttempts) {
+            clearInterval(waitForCompletion);
+            reject(new Error('Timeout: Import FTP non completato entro 60 secondi'));
+          }
+        }, checkInterval);
+      });
+      
+      console.log('[Pipeline Master] Step 1 completato: file importati');
+      
+      // =====================================================================
+      // STEP 2: EAN Prefill (se non già completato)
+      // =====================================================================
+      const currentPrefillState = prefillStateRef.current;
+      const currentFilesForPrefill = filesRef.current;
+      
+      if (currentPrefillState.status === 'done') {
+        console.log('[Pipeline Master] Step 2 saltato: prefill già completato');
+        setPipelineStatus('EAN Prefill già completato, proseguo…');
+      } else if (currentFilesForPrefill.eanMapping.file && currentFilesForPrefill.material.file) {
+        setPipelineStatus('EAN Prefill in corso…');
+        console.log('[Pipeline Master] Step 2: processEANPrefill');
+        
+        await processEANPrefill();
+        
+        // Attendi che il prefill sia completato
+        await new Promise<void>((resolve, reject) => {
+          let attempts = 0;
+          const maxAttempts = 120; // 60 secondi
+          const checkInterval = 500;
+          
+          const waitForPrefill = setInterval(() => {
+            attempts++;
+            const currentState = prefillStateRef.current;
+            
+            if (currentState.status === 'done') {
+              clearInterval(waitForPrefill);
+              resolve();
+            } else if (currentState.status === 'idle' && attempts > 5) {
+              // Se torna a idle dopo alcuni tentativi, potrebbe essere un errore
+              clearInterval(waitForPrefill);
+              reject(new Error('EAN Prefill fallito o interrotto'));
+            } else if (attempts >= maxAttempts) {
+              clearInterval(waitForPrefill);
+              reject(new Error('Timeout: EAN Prefill non completato entro 60 secondi'));
+            }
+          }, checkInterval);
+        });
+        
+        console.log('[Pipeline Master] Step 2 completato: prefill eseguito');
+      } else {
+        console.log('[Pipeline Master] Step 2 saltato: file mapping non presente');
+        setPipelineStatus('Nessun file mapping, proseguo…');
+      }
+      
+      // =====================================================================
+      // STEP 3: processDataPipeline('EAN')
+      // =====================================================================
+      setPipelineStatus('Elaborazione EAN in corso…');
+      console.log('[Pipeline Master] Step 3: processDataPipeline(EAN)');
+      
+      await processDataPipeline('EAN');
+      
+      // Attendi che la pipeline sia completata
+      await new Promise<void>((resolve, reject) => {
+        let attempts = 0;
+        const maxAttempts = 240; // 120 secondi
+        const checkInterval = 500;
+        
+        const waitForPipeline = setInterval(() => {
+          attempts++;
+          const currentState = processingStateRef.current;
+          
+          if (currentState === 'completed') {
+            clearInterval(waitForPipeline);
+            resolve();
+          } else if (currentState === 'failed') {
+            clearInterval(waitForPipeline);
+            reject(new Error('Elaborazione pipeline EAN fallita'));
+          } else if (attempts >= maxAttempts) {
+            clearInterval(waitForPipeline);
+            reject(new Error('Timeout: Elaborazione EAN non completata entro 120 secondi'));
+          }
+        }, checkInterval);
+      });
+      
+      console.log('[Pipeline Master] Step 3 completato: pipeline EAN elaborata');
+      
+      // =====================================================================
+      // STEP 4: downloadExcel('ean') che include salvataggio bucket e SFTP
+      // =====================================================================
+      setPipelineStatus('Export e upload in corso…');
+      console.log('[Pipeline Master] Step 4: downloadExcel(ean)');
+      
+      // Reset SFTP status before starting export
+      setSftpUploadStatus({ phase: 'idle', message: '' });
+      
+      // downloadExcel('ean') chiama onExportEAN internamente
+      downloadExcel('ean');
+      
+      // Attendi che l'export sia completato (monitorando sftpUploadStatus via ref)
+      await new Promise<void>((resolve, reject) => {
+        let attempts = 0;
+        const maxAttempts = 180; // 90 secondi
+        const checkInterval = 500;
+        
+        const waitForExport = setInterval(() => {
+          attempts++;
+          const currentStatus = sftpUploadStatusRef.current;
+          
+          if (currentStatus.phase === 'complete') {
+            clearInterval(waitForExport);
+            resolve();
+          } else if (currentStatus.phase === 'error') {
+            clearInterval(waitForExport);
+            reject(new Error(currentStatus.message || 'Errore durante export/upload SFTP'));
+          } else if (attempts >= maxAttempts) {
+            clearInterval(waitForExport);
+            reject(new Error('Timeout: Export/Upload non completato entro 90 secondi'));
+          }
+        }, checkInterval);
+      });
+      
+      console.log('[Pipeline Master] Step 4 completato: export e upload SFTP eseguiti');
+      
+      // =====================================================================
+      // SUCCESSO COMPLETO
+      // =====================================================================
+      setPipelineStatus('Pipeline completata con successo!');
+      toast({
+        title: "Pipeline completata con successo",
+        description: "Catalogo EAN ed export Mediaworld/ePrice generati e caricati su SFTP."
+      });
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Errore sconosciuto';
+      console.error('[Pipeline Master] Errore:', errorMessage);
+      setPipelineStatus(`Errore: ${errorMessage}`);
+      toast({
+        title: "Pipeline interrotta",
+        description: errorMessage,
+        variant: "destructive"
+      });
+    } finally {
+      setPipelineRunning(false);
+    }
+  };
+
   const downloadLog = (type: 'ean' | 'manufpartnr') => {
     if (currentLogEntries.length === 0 && !currentStats) return;
     
@@ -4327,6 +4526,56 @@ const AltersideCatalogGenerator: React.FC = () => {
           </p>
         </div>
 
+        {/* Pipeline Master Button */}
+        <div className="card border-strong" style={{ background: '#1e3a5f' }}>
+          <div className="card-body">
+            <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+              <div className="text-white">
+                <h3 className="text-xl font-bold mb-1">Pipeline Completa Automatica</h3>
+                <p className="text-sm opacity-80">
+                  Import FTP → Prefill EAN → Elaborazione → Export e Upload SFTP
+                </p>
+              </div>
+              <div className="flex flex-col items-center gap-2">
+                <Button
+                  onClick={handleFullPipeline}
+                  disabled={pipelineRunning || isProcessing || ftpImportLoading || isExportingEAN}
+                  size="lg"
+                  className="px-8 py-3 text-lg font-semibold"
+                  style={{ 
+                    background: pipelineRunning ? '#6b7280' : '#10b981', 
+                    color: 'white',
+                    opacity: (pipelineRunning || isProcessing || ftpImportLoading || isExportingEAN) ? 0.6 : 1
+                  }}
+                >
+                  {pipelineRunning ? (
+                    <>
+                      <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                      Pipeline in esecuzione…
+                    </>
+                  ) : (
+                    <>
+                      <Cloud className="mr-2 h-5 w-5" />
+                      Esegui Pipeline Completa
+                    </>
+                  )}
+                </Button>
+                {pipelineStatus && (
+                  <div className={`text-sm px-3 py-1 rounded ${
+                    pipelineStatus.includes('Errore') 
+                      ? 'bg-red-100 text-red-700' 
+                      : pipelineStatus.includes('successo') 
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-blue-100 text-blue-700'
+                  }`}>
+                    {pipelineStatus}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Instructions */}
         <div className="card border-strong">
           <div className="card-body">
@@ -4432,8 +4681,8 @@ const AltersideCatalogGenerator: React.FC = () => {
                     <div className="flex gap-3">
                       <button
                         onClick={processEANPrefill}
-                        disabled={!files.material.file || prefillState.status === 'running' || prefillState.status === 'done'}
-                        className={`btn btn-primary px-6 py-2 ${(!files.material.file || prefillState.status === 'running' || prefillState.status === 'done') ? 'is-disabled' : ''}`}
+                        disabled={!files.material.file || prefillState.status === 'running' || prefillState.status === 'done' || pipelineRunning}
+                        className={`btn btn-primary px-6 py-2 ${(!files.material.file || prefillState.status === 'running' || prefillState.status === 'done' || pipelineRunning) ? 'is-disabled' : ''}`}
                       >
                         {prefillState.status === 'running' ? (
                           <>
@@ -4645,7 +4894,7 @@ const AltersideCatalogGenerator: React.FC = () => {
           <Button
             variant="outline"
             onClick={handleFtpImport}
-            disabled={ftpImportLoading || isProcessing}
+            disabled={ftpImportLoading || isProcessing || pipelineRunning}
           >
             {ftpImportLoading ? (
               <>
@@ -4798,8 +5047,8 @@ const AltersideCatalogGenerator: React.FC = () => {
             <div className="flex flex-wrap justify-center gap-6">
               <button
                 onClick={() => processDataPipeline('EAN')}
-                disabled={!canProcess || isProcessing}
-                className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isProcessing ? 'is-disabled' : ''}`}
+                disabled={!canProcess || isProcessing || pipelineRunning}
+                className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isProcessing || pipelineRunning ? 'is-disabled' : ''}`}
               >
                 {isProcessing && currentPipeline === 'EAN' ? (
                   <>
@@ -4815,8 +5064,8 @@ const AltersideCatalogGenerator: React.FC = () => {
               </button>
               <button
                 onClick={() => processDataPipeline('MPN')}
-                disabled={!canProcess || isProcessing}
-                className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isProcessing ? 'is-disabled' : ''}`}
+                disabled={!canProcess || isProcessing || pipelineRunning}
+                className={`btn btn-primary text-lg px-12 py-4 ${!canProcess || isProcessing || pipelineRunning ? 'is-disabled' : ''}`}
               >
                 {isProcessing && currentPipeline === 'MPN' ? (
                   <>
@@ -5005,8 +5254,8 @@ const AltersideCatalogGenerator: React.FC = () => {
               <button 
                 type="button"
                 onClick={currentPipeline === 'EAN' ? onExportEAN : () => downloadExcel('manufpartnr')} 
-                disabled={isExportingEAN && currentPipeline === 'EAN'}
-                className={`btn btn-primary text-lg px-8 py-3 ${isExportingEAN && currentPipeline === 'EAN' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                disabled={(isExportingEAN && currentPipeline === 'EAN') || pipelineRunning}
+                className={`btn btn-primary text-lg px-8 py-3 ${(isExportingEAN && currentPipeline === 'EAN') || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 <Download className="mr-3 h-5 w-5" />
                 {isExportingEAN && currentPipeline === 'EAN' ? 'ESPORTAZIONE...' : `SCARICA EXCEL (${currentPipeline})`}
@@ -5056,8 +5305,8 @@ const AltersideCatalogGenerator: React.FC = () => {
                   <button 
                     type="button"
                     onClick={onExportEprice}
-                    disabled={isExportingEprice}
-                    className={`btn btn-primary text-lg px-8 py-3 ${isExportingEprice ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    disabled={isExportingEprice || pipelineRunning}
+                    className={`btn btn-primary text-lg px-8 py-3 ${isExportingEprice || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
                     style={{ background: '#0369a1' }}
                   >
                     <Download className="mr-3 h-5 w-5" />
@@ -5097,8 +5346,8 @@ const AltersideCatalogGenerator: React.FC = () => {
                   <button 
                     type="button"
                     onClick={onExportMediaworld}
-                    disabled={isExportingMediaworld}
-                    className={`btn btn-primary text-lg px-8 py-3 ${isExportingMediaworld ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    disabled={isExportingMediaworld || pipelineRunning}
+                    className={`btn btn-primary text-lg px-8 py-3 ${isExportingMediaworld || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
                     style={{ background: '#d97706' }}
                   >
                     <Download className="mr-3 h-5 w-5" />
