@@ -28,6 +28,18 @@ const corsHeaders = {
 const PRODUCTS_FILE_PATH = '_pipeline/products.tsv';
 const EAN_CATALOG_FILE_PATH = '_pipeline/ean_catalog.tsv';
 
+// ========== COLUMN ALIASES (case-insensitive matching) ==========
+const COLUMN_ALIASES: Record<string, string[]> = {
+  'Matnr': ['matnr', 'mat_nr', 'material_nr', 'materialnr', 'material', 'sku', 'product_id', 'productid', 'id'],
+  'ManufPartNr': ['manufpartnr', 'manuf_part_nr', 'mpn', 'manufacturer_part_nr', 'partnr', 'part_nr', 'partno', 'part_no'],
+  'EAN': ['ean', 'ean13', 'ean_code', 'barcode', 'upc', 'gtin'],
+  'ShortDescription': ['shortdescription', 'short_description', 'description', 'desc', 'name', 'product_name', 'title'],
+  'ExistingStock': ['existingstock', 'existing_stock', 'stock', 'qty', 'quantity', 'available', 'available_stock', 'onhand', 'on_hand'],
+  'ListPrice': ['listprice', 'list_price', 'price', 'retail_price', 'retailprice', 'msrp'],
+  'CustBestPrice': ['custbestprice', 'cust_best_price', 'cost', 'cost_price', 'costprice', 'buy_price', 'buyprice', 'wholesale'],
+  'Surcharge': ['surcharge', 'sur_charge', 'fee', 'markup', 'extra_cost', 'extracost'],
+};
+
 // ========== UTILITY FUNCTIONS ==========
 
 function toComma99Cents(cents: number): number {
@@ -47,6 +59,84 @@ function normalizeEAN(raw: unknown): { ok: boolean; value?: string; reason?: str
   if (compact.length === 13) return { ok: true, value: compact };
   if (compact.length === 14) return { ok: true, value: compact.startsWith('0') ? compact.substring(1) : compact };
   return { ok: false, reason: `lunghezza ${compact.length}` };
+}
+
+/**
+ * Auto-detect delimiter from first line of file
+ */
+function detectDelimiter(firstLine: string): string {
+  const delimiters = ['\t', ';', ',', '|'];
+  let bestDelimiter = '\t';
+  let maxCount = 0;
+  
+  for (const d of delimiters) {
+    const count = (firstLine.match(new RegExp(d.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&'), 'g')) || []).length;
+    if (count > maxCount) {
+      maxCount = count;
+      bestDelimiter = d;
+    }
+  }
+  
+  console.log(`[parser] Detected delimiter: "${bestDelimiter === '\t' ? 'TAB' : bestDelimiter}" (${maxCount} occurrences)`);
+  return bestDelimiter;
+}
+
+/**
+ * Find column index with case-insensitive matching and aliases
+ */
+function findColumnIndex(headers: string[], columnName: string): { index: number; matchedAs: string } {
+  // Normalize headers for comparison
+  const normalizedHeaders = headers.map(h => h.trim().toLowerCase().replace(/[\s_-]+/g, ''));
+  
+  // Get aliases for this column
+  const aliases = COLUMN_ALIASES[columnName] || [columnName.toLowerCase()];
+  
+  // Try each alias
+  for (const alias of aliases) {
+    const normalizedAlias = alias.toLowerCase().replace(/[\s_-]+/g, '');
+    const idx = normalizedHeaders.indexOf(normalizedAlias);
+    if (idx !== -1) {
+      return { index: idx, matchedAs: headers[idx] };
+    }
+  }
+  
+  // Try partial matching as fallback
+  for (const alias of aliases) {
+    const normalizedAlias = alias.toLowerCase().replace(/[\s_-]+/g, '');
+    for (let i = 0; i < normalizedHeaders.length; i++) {
+      if (normalizedHeaders[i].includes(normalizedAlias) || normalizedAlias.includes(normalizedHeaders[i])) {
+        return { index: i, matchedAs: headers[i] };
+      }
+    }
+  }
+  
+  return { index: -1, matchedAs: '' };
+}
+
+/**
+ * Parse a delimited file with auto-detection
+ */
+function parseDelimitedFile(content: string): { headers: string[]; lines: string[]; delimiter: string } {
+  const allLines = content.split('\n');
+  
+  // Skip empty lines at the beginning
+  let headerLineIdx = 0;
+  while (headerLineIdx < allLines.length && !allLines[headerLineIdx].trim()) {
+    headerLineIdx++;
+  }
+  
+  if (headerLineIdx >= allLines.length) {
+    return { headers: [], lines: [], delimiter: '\t' };
+  }
+  
+  const headerLine = allLines[headerLineIdx];
+  const delimiter = detectDelimiter(headerLine);
+  const headers = headerLine.split(delimiter).map(h => h.trim());
+  const lines = allLines.slice(headerLineIdx + 1);
+  
+  console.log(`[parser] Headers found (${headers.length}): ${headers.slice(0, 10).join(', ')}${headers.length > 10 ? '...' : ''}`);
+  
+  return { headers, lines, delimiter };
 }
 
 async function getLatestFile(supabase: any, folder: string): Promise<{ content: string | null; fileName: string | null }> {
@@ -154,7 +244,7 @@ async function stepParseMerge(supabase: any, runId: string): Promise<{ success: 
   const startTime = Date.now();
   
   try {
-    // 1. Build stock index
+    // 1. Build stock index with auto-detection
     const { content: stockTxt, fileName: stockFileName } = await getLatestFile(supabase, 'stock');
     if (!stockTxt) {
       const error = 'Stock file mancante o non leggibile';
@@ -162,27 +252,33 @@ async function stepParseMerge(supabase: any, runId: string): Promise<{ success: 
       return { success: false, error };
     }
     
-    console.log(`[sync:step:parse_merge] Building stock index from ${stockFileName}...`);
-    const stockMap = new Map<string, number>();
-    const stockLines = stockTxt.split('\n');
-    const stockHeaders = stockLines[0]?.split('\t').map(h => h.trim()) || [];
-    const matnrIdx = stockHeaders.indexOf('Matnr');
-    const stockIdx = stockHeaders.indexOf('ExistingStock');
+    console.log(`[sync:step:parse_merge] Parsing stock file: ${stockFileName}...`);
+    const stockParsed = parseDelimitedFile(stockTxt);
+    console.log(`[sync:step:parse_merge] Stock file - delimiter: "${stockParsed.delimiter === '\t' ? 'TAB' : stockParsed.delimiter}", headers: [${stockParsed.headers.join(', ')}]`);
     
-    if (matnrIdx === -1 || stockIdx === -1) {
-      const error = `Stock file headers non validi: Matnr=${matnrIdx}, ExistingStock=${stockIdx}`;
-      await updateStepResult(supabase, runId, 'parse_merge', { status: 'failed', error, metrics: {} });
+    // Find columns using robust matching
+    const stockMatnr = findColumnIndex(stockParsed.headers, 'Matnr');
+    const stockQty = findColumnIndex(stockParsed.headers, 'ExistingStock');
+    
+    console.log(`[sync:step:parse_merge] Stock column mapping: Matnr -> idx=${stockMatnr.index} (matched as "${stockMatnr.matchedAs}"), ExistingStock -> idx=${stockQty.index} (matched as "${stockQty.matchedAs}")`);
+    
+    if (stockMatnr.index === -1 || stockQty.index === -1) {
+      const error = `Stock file headers non validi. Headers trovati: [${stockParsed.headers.join(', ')}]. Matnr=${stockMatnr.index} (cercato: ${COLUMN_ALIASES['Matnr'].join('/')}), ExistingStock=${stockQty.index} (cercato: ${COLUMN_ALIASES['ExistingStock'].join('/')})`;
+      console.error(`[sync:step:parse_merge] ${error}`);
+      await updateStepResult(supabase, runId, 'parse_merge', { status: 'failed', error, headers_found: stockParsed.headers, metrics: {} });
       return { success: false, error };
     }
     
-    for (let i = 1; i < stockLines.length; i++) {
-      const vals = stockLines[i].split('\t');
-      const m = vals[matnrIdx]?.trim();
-      if (m) stockMap.set(m, parseInt(vals[stockIdx]) || 0);
+    const stockMap = new Map<string, number>();
+    for (const line of stockParsed.lines) {
+      if (!line.trim()) continue;
+      const vals = line.split(stockParsed.delimiter);
+      const m = vals[stockMatnr.index]?.trim();
+      if (m) stockMap.set(m, parseInt(vals[stockQty.index]) || 0);
     }
-    console.log(`[sync:step:parse_merge] Stock entries: ${stockMap.size}`);
+    console.log(`[sync:step:parse_merge] Stock entries loaded: ${stockMap.size}`);
     
-    // 2. Build price index
+    // 2. Build price index with auto-detection
     const { content: priceTxt, fileName: priceFileName } = await getLatestFile(supabase, 'price');
     if (!priceTxt) {
       const error = 'Price file mancante o non leggibile';
@@ -190,32 +286,41 @@ async function stepParseMerge(supabase: any, runId: string): Promise<{ success: 
       return { success: false, error };
     }
     
-    console.log(`[sync:step:parse_merge] Building price index from ${priceFileName}...`);
-    const priceMap = new Map<string, { lp: number; cbp: number; sur: number }>();
-    const priceLines = priceTxt.split('\n');
-    const priceHeaders = priceLines[0]?.split('\t').map(h => h.trim()) || [];
-    const priceMatnrIdx = priceHeaders.indexOf('Matnr');
-    const lpIdx = priceHeaders.indexOf('ListPrice');
-    const cbpIdx = priceHeaders.indexOf('CustBestPrice');
-    const surIdx = priceHeaders.indexOf('Surcharge');
+    console.log(`[sync:step:parse_merge] Parsing price file: ${priceFileName}...`);
+    const priceParsed = parseDelimitedFile(priceTxt);
+    console.log(`[sync:step:parse_merge] Price file - delimiter: "${priceParsed.delimiter === '\t' ? 'TAB' : priceParsed.delimiter}", headers count: ${priceParsed.headers.length}`);
     
-    if (priceMatnrIdx === -1) {
-      const error = `Price file headers non validi: Matnr=${priceMatnrIdx}`;
+    const priceMatnr = findColumnIndex(priceParsed.headers, 'Matnr');
+    const priceLp = findColumnIndex(priceParsed.headers, 'ListPrice');
+    const priceCbp = findColumnIndex(priceParsed.headers, 'CustBestPrice');
+    const priceSur = findColumnIndex(priceParsed.headers, 'Surcharge');
+    
+    console.log(`[sync:step:parse_merge] Price column mapping: Matnr=${priceMatnr.index}, ListPrice=${priceLp.index}, CustBestPrice=${priceCbp.index}, Surcharge=${priceSur.index}`);
+    
+    if (priceMatnr.index === -1) {
+      const error = `Price file headers non validi. Headers trovati: [${priceParsed.headers.slice(0, 10).join(', ')}...]. Matnr=${priceMatnr.index}`;
+      console.error(`[sync:step:parse_merge] ${error}`);
       await updateStepResult(supabase, runId, 'parse_merge', { status: 'failed', error, metrics: {} });
       return { success: false, error };
     }
     
-    for (let i = 1; i < priceLines.length; i++) {
-      const vals = priceLines[i].split('\t');
-      const m = vals[priceMatnrIdx]?.trim();
+    const priceMap = new Map<string, { lp: number; cbp: number; sur: number }>();
+    for (const line of priceParsed.lines) {
+      if (!line.trim()) continue;
+      const vals = line.split(priceParsed.delimiter);
+      const m = vals[priceMatnr.index]?.trim();
       if (m) {
         const parse = (v: any) => parseFloat(String(v || '0').replace(',', '.')) || 0;
-        priceMap.set(m, { lp: parse(vals[lpIdx]), cbp: parse(vals[cbpIdx]), sur: parse(vals[surIdx]) });
+        priceMap.set(m, { 
+          lp: priceLp.index >= 0 ? parse(vals[priceLp.index]) : 0, 
+          cbp: priceCbp.index >= 0 ? parse(vals[priceCbp.index]) : 0, 
+          sur: priceSur.index >= 0 ? parse(vals[priceSur.index]) : 0 
+        });
       }
     }
-    console.log(`[sync:step:parse_merge] Price entries: ${priceMap.size}`);
+    console.log(`[sync:step:parse_merge] Price entries loaded: ${priceMap.size}`);
     
-    // 3. Process material file
+    // 3. Process material file with auto-detection
     const { content: materialTxt, fileName: materialFileName } = await getLatestFile(supabase, 'material');
     if (!materialTxt) {
       const error = 'Material file mancante o non leggibile';
@@ -223,16 +328,20 @@ async function stepParseMerge(supabase: any, runId: string): Promise<{ success: 
       return { success: false, error };
     }
     
-    console.log(`[sync:step:parse_merge] Processing material file ${materialFileName}...`);
-    const materialLines = materialTxt.split('\n');
-    const materialHeaders = materialLines[0]?.split('\t').map(h => h.trim()) || [];
-    const mMatnrIdx = materialHeaders.indexOf('Matnr');
-    const mMpnIdx = materialHeaders.indexOf('ManufPartNr');
-    const mEanIdx = materialHeaders.indexOf('EAN');
-    const mDescIdx = materialHeaders.indexOf('ShortDescription');
+    console.log(`[sync:step:parse_merge] Parsing material file: ${materialFileName}...`);
+    const materialParsed = parseDelimitedFile(materialTxt);
+    console.log(`[sync:step:parse_merge] Material file - delimiter: "${materialParsed.delimiter === '\t' ? 'TAB' : materialParsed.delimiter}", headers count: ${materialParsed.headers.length}`);
     
-    if (mMatnrIdx === -1) {
-      const error = `Material file headers non validi: Matnr=${mMatnrIdx}`;
+    const matMatnr = findColumnIndex(materialParsed.headers, 'Matnr');
+    const matMpn = findColumnIndex(materialParsed.headers, 'ManufPartNr');
+    const matEan = findColumnIndex(materialParsed.headers, 'EAN');
+    const matDesc = findColumnIndex(materialParsed.headers, 'ShortDescription');
+    
+    console.log(`[sync:step:parse_merge] Material column mapping: Matnr=${matMatnr.index}, ManufPartNr=${matMpn.index}, EAN=${matEan.index}, ShortDescription=${matDesc.index}`);
+    
+    if (matMatnr.index === -1) {
+      const error = `Material file headers non validi. Headers trovati: [${materialParsed.headers.slice(0, 10).join(', ')}...]. Matnr=${matMatnr.index}`;
+      console.error(`[sync:step:parse_merge] ${error}`);
       await updateStepResult(supabase, runId, 'parse_merge', { status: 'failed', error, metrics: {} });
       return { success: false, error };
     }
@@ -242,12 +351,11 @@ async function stepParseMerge(supabase: any, runId: string): Promise<{ success: 
     
     const outputLines: string[] = ['Matnr\tMPN\tEAN\tDesc\tStock\tLP\tCBP\tSur'];
     
-    for (let i = 1; i < materialLines.length; i++) {
-      const line = materialLines[i];
+    for (const line of materialParsed.lines) {
       if (!line.trim()) continue;
       
-      const vals = line.split('\t');
-      const m = vals[mMatnrIdx]?.trim();
+      const vals = line.split(materialParsed.delimiter);
+      const m = vals[matMatnr.index]?.trim();
       if (!m) continue;
       
       const stock = stockMap.get(m);
@@ -258,11 +366,15 @@ async function stepParseMerge(supabase: any, runId: string): Promise<{ success: 
       if (stock < 2) { skipped.lowStock++; continue; }
       if (price.lp <= 0 && price.cbp <= 0) { skipped.noValid++; continue; }
       
-      outputLines.push(`${m}\t${vals[mMpnIdx]?.trim() || ''}\t${vals[mEanIdx]?.trim() || ''}\t${vals[mDescIdx]?.trim() || ''}\t${stock}\t${price.lp}\t${price.cbp}\t${price.sur}`);
+      const mpn = matMpn.index >= 0 ? vals[matMpn.index]?.trim() || '' : '';
+      const ean = matEan.index >= 0 ? vals[matEan.index]?.trim() || '' : '';
+      const desc = matDesc.index >= 0 ? vals[matDesc.index]?.trim() || '' : '';
+      
+      outputLines.push(`${m}\t${mpn}\t${ean}\t${desc}\t${stock}\t${price.lp}\t${price.cbp}\t${price.sur}`);
       productCount++;
     }
     
-    console.log(`[sync:step:parse_merge] Products: ${productCount}, skipped: ${JSON.stringify(skipped)}`);
+    console.log(`[sync:step:parse_merge] Products merged: ${productCount}, skipped: ${JSON.stringify(skipped)}`);
     
     // Save as TSV with verification
     const csvContent = outputLines.join('\n');
