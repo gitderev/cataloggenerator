@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.stop-sync]
 verify_jwt = false
+
+[functions.force-reset-sync]
+verify_jwt = false
