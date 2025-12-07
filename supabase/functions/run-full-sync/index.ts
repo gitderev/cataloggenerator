@@ -9,51 +9,19 @@ const corsHeaders = {
 /**
  * run-full-sync - ORCHESTRATORE LEGGERO
  * 
- * Non esegue direttamente la pipeline, ma coordina l'esecuzione di step separati.
- * Ogni step è eseguito da una edge function dedicata o dal sync-step-runner.
+ * Non esegue logica di business, solo orchestrazione.
+ * Chiama step separati tramite sync-step-runner per evitare WORKER_LIMIT.
  * 
  * Sequenza step:
- * 1. import_ftp - Download file da FTP (edge function esistente)
- * 2. parse_merge - Parse e merge file
+ * 1. import_ftp - Download file da FTP (import-catalog-ftp)
+ * 2. parse_merge - Parse e merge file (chunked)
  * 3. ean_mapping - Mapping EAN
- * 4. pricing - Calcolo prezzi
- * 5. override - Skip (non implementato server-side)
- * 6. export_ean - Generazione catalogo EAN
- * 7. export_mediaworld - Export Mediaworld
- * 8. export_eprice - Export ePrice  
- * 9. upload_sftp - Upload su SFTP (edge function esistente)
- * 
- * Stato sync_runs:
- * - running: in esecuzione
- * - success: completata con successo
- * - failed: fallita
+ * 4. pricing - Calcolo prezzi (chunked)
+ * 5. export_ean - Generazione catalogo EAN
+ * 6. export_mediaworld - Export Mediaworld
+ * 7. export_eprice - Export ePrice
+ * 8. upload_sftp - Upload su SFTP (upload-exports-to-sftp)
  */
-
-interface PipelineMetrics {
-  products_total: number;
-  products_processed: number;
-  products_ean_mapped: number;
-  products_ean_missing: number;
-  products_ean_invalid: number;
-  products_after_override: number;
-  mediaworld_export_rows: number;
-  mediaworld_export_skipped: number;
-  eprice_export_rows: number;
-  eprice_export_skipped: number;
-  exported_files_count: number;
-  sftp_uploaded_files: number;
-  warnings: string[];
-}
-
-function initMetrics(): PipelineMetrics {
-  return {
-    products_total: 0, products_processed: 0, products_ean_mapped: 0,
-    products_ean_missing: 0, products_ean_invalid: 0, products_after_override: 0,
-    mediaworld_export_rows: 0, mediaworld_export_skipped: 0,
-    eprice_export_rows: 0, eprice_export_skipped: 0,
-    exported_files_count: 0, sftp_uploaded_files: 0, warnings: []
-  };
-}
 
 async function callStep(supabaseUrl: string, serviceKey: string, functionName: string, body: any): Promise<{ success: boolean; error?: string; data?: any }> {
   try {
@@ -81,24 +49,18 @@ async function isCancelRequested(supabase: any, runId: string): Promise<boolean>
   return data?.cancel_requested === true;
 }
 
-async function finalizeRun(supabase: any, runId: string, status: string, startTime: number, errorMessage?: string, errorDetails?: any): Promise<void> {
-  const { data: run } = await supabase.from('sync_runs').select('steps, metrics').eq('id', runId).single();
+async function updateRun(supabase: any, runId: string, updates: any): Promise<void> {
+  await supabase.from('sync_runs').update(updates).eq('id', runId);
+}
+
+async function finalizeRun(supabase: any, runId: string, status: string, startTime: number, errorMessage?: string): Promise<void> {
   await supabase.from('sync_runs').update({
     status, 
     finished_at: new Date().toISOString(), 
     runtime_ms: Date.now() - startTime,
-    steps: run?.steps || {},
-    metrics: run?.metrics || initMetrics(),
-    error_message: errorMessage || null, 
-    error_details: errorDetails || null
+    error_message: errorMessage || null
   }).eq('id', runId);
-  console.log(`[orchestrator] Run ${runId} finalized with status: ${status}`);
-}
-
-async function updateCurrentStep(supabase: any, runId: string, stepName: string): Promise<void> {
-  const { data: run } = await supabase.from('sync_runs').select('steps').eq('id', runId).single();
-  const steps = { ...(run?.steps || {}), current_step: stepName };
-  await supabase.from('sync_runs').update({ steps }).eq('id', runId);
+  console.log(`[orchestrator] Run ${runId} finalized: ${status}`);
 }
 
 serve(async (req) => {
@@ -188,44 +150,37 @@ serve(async (req) => {
     startTime = Date.now();
     await supabase.from('sync_runs').insert({ 
       id: runId, started_at: new Date().toISOString(), status: 'running', 
-      trigger_type: trigger, attempt: 1, steps: { current_step: 'import_ftp' }, metrics: initMetrics() 
+      trigger_type: trigger, attempt: 1, steps: { current_step: 'import_ftp' }, metrics: {} 
     });
     console.log(`[orchestrator] Run created: ${runId}`);
 
     // ========== STEP 1: FTP Import ==========
-    await updateCurrentStep(supabase, runId, 'import_ftp');
+    await updateRun(supabase, runId, { steps: { current_step: 'import_ftp' } });
     console.log('[orchestrator] === STEP 1: FTP Import ===');
     
-    const ftpStepStart = Date.now();
     for (const fileType of ['material', 'stock', 'price']) {
       if (await isCancelRequested(supabase, runId)) {
-        await finalizeRun(supabase, runId, 'failed', startTime, 'Interrotta dall\'utente', { step: 'import_ftp' });
+        await finalizeRun(supabase, runId, 'failed', startTime, 'Interrotta dall\'utente');
         return new Response(JSON.stringify({ status: 'cancelled' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
       
       const result = await callStep(supabaseUrl, supabaseServiceKey, 'import-catalog-ftp', { fileType });
       if (!result.success) {
-        await finalizeRun(supabase, runId, 'failed', startTime, `FTP ${fileType}: ${result.error}`, { step: 'import_ftp', fileType });
+        await finalizeRun(supabase, runId, 'failed', startTime, `FTP ${fileType}: ${result.error}`);
         return new Response(JSON.stringify({ status: 'failed', error: result.error }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }
-    
-    // Update step result
-    const { data: currentRun } = await supabase.from('sync_runs').select('steps').eq('id', runId).single();
-    await supabase.from('sync_runs').update({ 
-      steps: { ...(currentRun?.steps || {}), import_ftp: { status: 'success', duration_ms: Date.now() - ftpStepStart } } 
-    }).eq('id', runId);
 
-    // ========== STEP 2-5: Parse, EAN, Pricing via step-runner ==========
-    const stepRunnerSteps = ['parse_merge', 'ean_mapping', 'pricing'];
+    // ========== STEPS 2-7: Processing via sync-step-runner (chunked) ==========
+    const processingSteps = ['parse_merge', 'ean_mapping', 'pricing', 'export_ean', 'export_mediaworld', 'export_eprice'];
     
-    for (const step of stepRunnerSteps) {
+    for (const step of processingSteps) {
       if (await isCancelRequested(supabase, runId)) {
-        await finalizeRun(supabase, runId, 'failed', startTime, 'Interrotta dall\'utente', { step });
+        await finalizeRun(supabase, runId, 'failed', startTime, 'Interrotta dall\'utente');
         return new Response(JSON.stringify({ status: 'cancelled' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
       
-      await updateCurrentStep(supabase, runId, step);
+      await updateRun(supabase, runId, { steps: { current_step: step } });
       console.log(`[orchestrator] === STEP: ${step} ===`);
       
       const result = await callStep(supabaseUrl, supabaseServiceKey, 'sync-step-runner', { 
@@ -233,57 +188,20 @@ serve(async (req) => {
       });
       
       if (!result.success) {
-        await finalizeRun(supabase, runId, 'failed', startTime, `${step}: ${result.error}`, { step });
+        await finalizeRun(supabase, runId, 'failed', startTime, `${step}: ${result.error}`);
         return new Response(JSON.stringify({ status: 'failed', error: result.error }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }
 
-    // ========== STEP 5: Override (skipped) ==========
-    await updateCurrentStep(supabase, runId, 'override');
-    const { data: runForOverride } = await supabase.from('sync_runs').select('steps, metrics').eq('id', runId).single();
-    await supabase.from('sync_runs').update({ 
-      steps: { ...(runForOverride?.steps || {}), override: { status: 'skipped', duration_ms: 0, reason: 'Non implementato server-side' } },
-      metrics: { ...(runForOverride?.metrics || {}), products_after_override: runForOverride?.metrics?.products_processed || 0 }
-    }).eq('id', runId);
-
-    // ========== STEP 6-8: Export steps ==========
-    const exportSteps = ['export_ean', 'export_mediaworld', 'export_eprice'];
-    
-    for (const step of exportSteps) {
-      if (await isCancelRequested(supabase, runId)) {
-        await finalizeRun(supabase, runId, 'failed', startTime, 'Interrotta dall\'utente', { step });
-        return new Response(JSON.stringify({ status: 'cancelled' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-      }
-      
-      await updateCurrentStep(supabase, runId, step);
-      console.log(`[orchestrator] === STEP: ${step} ===`);
-      
-      const result = await callStep(supabaseUrl, supabaseServiceKey, 'sync-step-runner', { 
-        run_id: runId, step, fee_config: feeConfig 
-      });
-      
-      if (!result.success) {
-        await finalizeRun(supabase, runId, 'failed', startTime, `${step}: ${result.error}`, { step });
-        return new Response(JSON.stringify({ status: 'failed', error: result.error }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-      }
-    }
-
-    // Update exported files count
-    const { data: runForExport } = await supabase.from('sync_runs').select('metrics').eq('id', runId).single();
-    await supabase.from('sync_runs').update({ 
-      metrics: { ...(runForExport?.metrics || {}), exported_files_count: 3 }
-    }).eq('id', runId);
-
-    // ========== STEP 9: SFTP Upload ==========
+    // ========== STEP 8: SFTP Upload ==========
     if (await isCancelRequested(supabase, runId)) {
-      await finalizeRun(supabase, runId, 'failed', startTime, 'Interrotta dall\'utente', { step: 'upload_sftp' });
+      await finalizeRun(supabase, runId, 'failed', startTime, 'Interrotta dall\'utente');
       return new Response(JSON.stringify({ status: 'cancelled' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
     
-    await updateCurrentStep(supabase, runId, 'upload_sftp');
-    console.log('[orchestrator] === STEP 9: SFTP Upload ===');
+    await updateRun(supabase, runId, { steps: { current_step: 'upload_sftp' } });
+    console.log('[orchestrator] === STEP 8: SFTP Upload ===');
     
-    const sftpStepStart = Date.now();
     const sftpResult = await callStep(supabaseUrl, supabaseServiceKey, 'upload-exports-to-sftp', {
       files: [
         { bucket: 'exports', path: 'Catalogo EAN.csv', filename: 'Catalogo EAN.csv' },
@@ -293,35 +211,25 @@ serve(async (req) => {
     });
     
     if (!sftpResult.success) {
-      await finalizeRun(supabase, runId, 'failed', startTime, `SFTP: ${sftpResult.error}`, { step: 'upload_sftp' });
+      await finalizeRun(supabase, runId, 'failed', startTime, `SFTP: ${sftpResult.error}`);
       return new Response(JSON.stringify({ status: 'failed', error: sftpResult.error }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
-    
-    const uploaded = sftpResult.data?.results?.filter((r: any) => r.uploaded).length || 0;
-    const { data: runForSftp } = await supabase.from('sync_runs').select('steps, metrics').eq('id', runId).single();
-    await supabase.from('sync_runs').update({ 
-      steps: { ...(runForSftp?.steps || {}), upload_sftp: { status: 'success', duration_ms: Date.now() - sftpStepStart, uploaded } },
-      metrics: { ...(runForSftp?.metrics || {}), sftp_uploaded_files: uploaded }
-    }).eq('id', runId);
 
     // ========== SUCCESS ==========
     await finalizeRun(supabase, runId, 'success', startTime);
+    console.log(`[orchestrator] Pipeline completed: ${runId}`);
     
-    const { data: finalRun } = await supabase.from('sync_runs').select('metrics').eq('id', runId).single();
-    console.log(`[orchestrator] Pipeline completed successfully: ${runId}`);
-    
-    return new Response(JSON.stringify({ status: 'success', run_id: runId, metrics: finalRun?.metrics }), 
+    return new Response(JSON.stringify({ status: 'success', run_id: runId }), 
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
   } catch (err: any) {
     console.error('[orchestrator] Fatal error:', err);
     
-    // Always try to finalize the run
     if (runId && supabase) {
       try {
-        await finalizeRun(supabase, runId, 'failed', startTime, err.message, { fatal: true, error: err.message });
-      } catch (finalizeErr) {
-        console.error('[orchestrator] Failed to finalize run:', finalizeErr);
+        await finalizeRun(supabase, runId, 'failed', startTime, err.message);
+      } catch (e) {
+        console.error('[orchestrator] Failed to finalize:', e);
       }
     }
     
