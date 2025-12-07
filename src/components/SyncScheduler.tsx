@@ -41,6 +41,14 @@ interface SyncConfig {
   updated_at: string;
 }
 
+/**
+ * Valori di stato possibili nella tabella sync_runs:
+ * - running: sincronizzazione in corso
+ * - success: sincronizzazione completata con successo
+ * - failed: sincronizzazione fallita (per errore, timeout, cancel, o reset)
+ * - timeout: sincronizzazione interrotta per superamento tempo massimo
+ * - skipped: sincronizzazione saltata (es. frequenza non ancora raggiunta)
+ */
 interface SyncRun {
   id: string;
   started_at: string;
@@ -56,6 +64,9 @@ interface SyncRun {
   cancel_requested: boolean;
   cancelled_by_user: boolean;
 }
+
+// Soglia per considerare una run come "bloccata/zombie" (15 minuti)
+const STALE_RUN_THRESHOLD_MS = 15 * 60 * 1000;
 
 interface StepResult {
   status: 'success' | 'failed' | 'skipped';
@@ -200,11 +211,13 @@ export const SyncScheduler: React.FC = () => {
   const [config, setConfig] = useState<SyncConfig | null>(null);
   const [runs, setRuns] = useState<SyncRun[]>([]);
   const [currentRun, setCurrentRun] = useState<SyncRun | null>(null);
+  const [isStaleRun, setIsStaleRun] = useState(false);
   const [selectedRun, setSelectedRun] = useState<SyncRun | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [expandedLogDetails, setExpandedLogDetails] = useState<string | null>(null);
 
@@ -233,8 +246,25 @@ export const SyncScheduler: React.FC = () => {
       
       setRuns((runsData || []) as unknown as SyncRun[]);
 
+      // Trova run in stato running
       const running = (runsData || []).find((r: any) => r.status === 'running');
-      setCurrentRun(running as unknown as SyncRun || null);
+      
+      if (running) {
+        // Controlla se è una run "zombie" (in running da più di 15 minuti)
+        const startedAt = new Date(running.started_at).getTime();
+        const elapsed = Date.now() - startedAt;
+        const isStale = elapsed > STALE_RUN_THRESHOLD_MS;
+        
+        setCurrentRun(running as unknown as SyncRun);
+        setIsStaleRun(isStale);
+        
+        if (isStale) {
+          console.log(`[SyncScheduler] Detected stale run: ${running.id}, running for ${Math.round(elapsed / 60000)} minutes`);
+        }
+      } else {
+        setCurrentRun(null);
+        setIsStaleRun(false);
+      }
 
     } catch (error: any) {
       console.error('Error loading sync data:', error);
@@ -333,7 +363,7 @@ export const SyncScheduler: React.FC = () => {
     }
   };
 
-  const stopSync = async () => {
+  const stopSync = async (force = false) => {
     if (!currentRun) {
       toast({
         title: 'Nessuna sync in corso',
@@ -345,6 +375,53 @@ export const SyncScheduler: React.FC = () => {
     setIsStopping(true);
     try {
       const response = await supabase.functions.invoke('stop-sync', {
+        body: { run_id: currentRun.id, force }
+      });
+
+      if (response.error) {
+        throw new Error(response.error.message);
+      }
+
+      const data = response.data;
+
+      if (data.status === 'error') {
+        throw new Error(data.message);
+      }
+
+      toast({
+        title: force ? 'Sincronizzazione interrotta' : 'Richiesta inviata',
+        description: force 
+          ? 'La sincronizzazione è stata interrotta immediatamente' 
+          : 'La sincronizzazione verrà interrotta al prossimo step'
+      });
+
+      await loadData();
+
+    } catch (error: any) {
+      console.error('Error stopping sync:', error);
+      toast({
+        title: 'Errore',
+        description: error.message || 'Impossibile interrompere la sincronizzazione',
+        variant: 'destructive'
+      });
+    } finally {
+      setIsStopping(false);
+    }
+  };
+
+  // Funzione per forzare il reset di run zombie/bloccate
+  const forceResetSync = async () => {
+    if (!currentRun) {
+      toast({
+        title: 'Nessuna sync da resettare',
+        description: 'Non c\'è alcuna sincronizzazione bloccata'
+      });
+      return;
+    }
+
+    setIsResetting(true);
+    try {
+      const response = await supabase.functions.invoke('force-reset-sync', {
         body: { run_id: currentRun.id }
       });
 
@@ -359,21 +436,21 @@ export const SyncScheduler: React.FC = () => {
       }
 
       toast({
-        title: 'Richiesta inviata',
-        description: 'La sincronizzazione verrà interrotta al prossimo step'
+        title: 'Reset completato',
+        description: 'La sincronizzazione bloccata è stata resettata'
       });
 
       await loadData();
 
     } catch (error: any) {
-      console.error('Error stopping sync:', error);
+      console.error('Error resetting sync:', error);
       toast({
         title: 'Errore',
-        description: error.message || 'Impossibile interrompere la sincronizzazione',
+        description: error.message || 'Impossibile resettare la sincronizzazione',
         variant: 'destructive'
       });
     } finally {
-      setIsStopping(false);
+      setIsResetting(false);
     }
   };
 
@@ -632,19 +709,50 @@ export const SyncScheduler: React.FC = () => {
               Esegui sincronizzazione ora
             </Button>
             
-            <Button
-              variant="outline"
-              onClick={stopSync}
-              disabled={isStopping || !currentRun}
-              className="border-red-300 text-red-600 hover:bg-red-50 hover:border-red-400 font-semibold disabled:border-slate-200 disabled:text-slate-400 disabled:bg-transparent"
-            >
-              {isStopping ? (
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-              ) : (
-                <Square className="h-4 w-4 mr-2" />
-              )}
-              Ferma sincronizzazione
-            </Button>
+            {/* Mostra pulsante diverso se la run è bloccata/zombie */}
+            {isStaleRun && currentRun ? (
+              <Button
+                variant="outline"
+                onClick={forceResetSync}
+                disabled={isResetting}
+                className="border-amber-400 text-amber-700 hover:bg-amber-50 hover:border-amber-500 font-semibold"
+              >
+                {isResetting ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : (
+                  <AlertTriangle className="h-4 w-4 mr-2" />
+                )}
+                Sblocca sincronizzazione
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                onClick={() => stopSync(false)}
+                disabled={isStopping || !currentRun}
+                className="border-red-300 text-red-600 hover:bg-red-50 hover:border-red-400 font-semibold disabled:border-slate-200 disabled:text-slate-400 disabled:bg-transparent"
+              >
+                {isStopping ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : (
+                  <Square className="h-4 w-4 mr-2" />
+                )}
+                Ferma sincronizzazione
+              </Button>
+            )}
+
+            {/* Pulsante per forzare l'interruzione (sempre visibile se c'è una run) */}
+            {currentRun && !isStaleRun && (
+              <Button
+                variant="ghost"
+                onClick={() => stopSync(true)}
+                disabled={isStopping}
+                className="text-amber-600 hover:text-amber-700 hover:bg-amber-50 font-medium"
+                title="Forza l'interruzione immediata senza attendere il prossimo step"
+              >
+                <AlertTriangle className="h-4 w-4 mr-2" />
+                Forza stop
+              </Button>
+            )}
 
             <Button
               variant="ghost"
@@ -656,6 +764,22 @@ export const SyncScheduler: React.FC = () => {
               {showLogs ? <ChevronDown className="h-4 w-4 ml-1" /> : <ChevronRight className="h-4 w-4 ml-1" />}
             </Button>
           </div>
+
+          {/* Warning per run bloccata */}
+          {isStaleRun && currentRun && (
+            <div className="bg-amber-50 border-2 border-amber-200 rounded-lg p-4 flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-amber-800">
+                  Sincronizzazione bloccata
+                </p>
+                <p className="text-sm text-amber-600 mt-1">
+                  La sincronizzazione è in esecuzione da più di 15 minuti e potrebbe essere bloccata.
+                  Usa il pulsante "Sblocca sincronizzazione" per resettare lo stato e poter avviare una nuova run.
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Sync Logs */}
           {showLogs && (
