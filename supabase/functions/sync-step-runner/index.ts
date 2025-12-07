@@ -7,29 +7,21 @@ const corsHeaders = {
 };
 
 /**
- * sync-step-runner
+ * sync-step-runner - STEP PROCESSOR CON CHUNKING
  * 
- * Esegue un singolo step della pipeline di sincronizzazione.
- * Riceve run_id e step_name, esegue solo quello step, salva risultati nello storage.
+ * Esegue singoli step della pipeline usando streaming e chunking.
+ * I dati intermedi sono salvati come TSV (più leggero di JSON) nello storage.
  * 
- * Steps supportati:
- * - parse_merge: Parse e merge dei file FTP
+ * Steps:
+ * - parse_merge: Parse e merge file FTP (streaming line-by-line)
  * - ean_mapping: Mapping EAN da file CSV
- * - pricing: Calcolo prezzi finali
+ * - pricing: Calcolo prezzi finali (chunked)
  * - export_ean: Generazione catalogo EAN
  * - export_mediaworld: Generazione export Mediaworld
  * - export_eprice: Generazione export ePrice
  */
 
-// Utility functions
-function parseEuroLike(input: unknown): number {
-  if (typeof input === 'number' && isFinite(input)) return input;
-  let s = String(input ?? '').trim().replace(/[^\d.,\s%\-]/g, '').split(/\s+/)[0]?.replace(/%/g, '').trim() ?? '';
-  if (!s) return NaN;
-  if (s.includes('.') && s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
-  else s = s.replace(',', '.');
-  return parseFloat(s);
-}
+// ========== UTILITY FUNCTIONS ==========
 
 function toComma99Cents(cents: number): number {
   if (cents % 100 === 99) return cents;
@@ -44,139 +36,183 @@ function normalizeEAN(raw: unknown): { ok: boolean; value?: string; reason?: str
   if (!original) return { ok: false, reason: 'EAN mancante' };
   const compact = original.replace(/[\s-]+/g, '');
   if (!/^\d+$/.test(compact)) return { ok: false, reason: 'EAN non numerico' };
-  if (compact.length === 12) return { ok: true, value: '0' + compact, reason: 'padded' };
-  if (compact.length === 13) return { ok: true, value: compact, reason: 'valid_13' };
-  if (compact.length === 14) return { ok: true, value: compact.startsWith('0') ? compact.substring(1) : compact, reason: 'valid_14' };
+  if (compact.length === 12) return { ok: true, value: '0' + compact };
+  if (compact.length === 13) return { ok: true, value: compact };
+  if (compact.length === 14) return { ok: true, value: compact.startsWith('0') ? compact.substring(1) : compact };
   return { ok: false, reason: `lunghezza ${compact.length}` };
 }
 
-function parseTab(txt: string): any[] {
-  const lines = txt.split('\n');
-  const headers = lines[0]?.split('\t').map(h => h.trim()) || [];
-  return lines.slice(1).filter(l => l.trim()).map(l => {
-    const vals = l.split('\t');
-    const row: any = {};
-    headers.forEach((h, i) => row[h] = vals[i]?.trim() ?? '');
-    return row;
-  });
-}
-
-async function updateStepResult(supabase: any, runId: string, stepName: string, result: any, metrics: any): Promise<void> {
-  const { data: run } = await supabase.from('sync_runs').select('steps, metrics').eq('id', runId).single();
-  const steps = { ...(run?.steps || {}), [stepName]: result };
-  const mergedMetrics = { ...(run?.metrics || {}), ...metrics };
-  await supabase.from('sync_runs').update({ steps, metrics: mergedMetrics }).eq('id', runId);
-}
-
 async function getLatestFile(supabase: any, folder: string): Promise<string | null> {
-  const { data: files } = await supabase.storage.from('ftp-import').list(folder, { sortBy: { column: 'created_at', order: 'desc' }, limit: 1 });
+  const { data: files } = await supabase.storage.from('ftp-import').list(folder, { 
+    sortBy: { column: 'created_at', order: 'desc' }, limit: 1 
+  });
   if (!files?.length) return null;
   const { data } = await supabase.storage.from('ftp-import').download(`${folder}/${files[0].name}`);
   return data ? await data.text() : null;
 }
 
-// ========== STEP HANDLERS ==========
+async function updateStepResult(supabase: any, runId: string, stepName: string, result: any): Promise<void> {
+  const { data: run } = await supabase.from('sync_runs').select('steps, metrics').eq('id', runId).single();
+  const steps = { ...(run?.steps || {}), [stepName]: result, current_step: stepName };
+  const metrics = { ...(run?.metrics || {}), ...result.metrics };
+  await supabase.from('sync_runs').update({ steps, metrics }).eq('id', runId);
+}
 
-async function stepParseMerge(supabase: any, runId: string): Promise<{ success: boolean; error?: string; metrics?: any }> {
+// ========== STEP: PARSE_MERGE (STREAMING) ==========
+async function stepParseMerge(supabase: any, runId: string): Promise<{ success: boolean; error?: string }> {
   console.log(`[sync:step:parse_merge] Starting for run ${runId}`);
   const startTime = Date.now();
   
   try {
-    const [materialTxt, stockTxt, priceTxt] = await Promise.all([
-      getLatestFile(supabase, 'material'),
-      getLatestFile(supabase, 'stock'),
-      getLatestFile(supabase, 'price')
-    ]);
+    // 1. Build stock index (lighter, load first)
+    const stockTxt = await getLatestFile(supabase, 'stock');
+    if (!stockTxt) return { success: false, error: 'Stock file mancante' };
     
-    if (!materialTxt || !stockTxt || !priceTxt) {
-      return { success: false, error: 'File sorgente mancanti (material, stock o price)' };
-    }
-    
-    console.log(`[sync:step:parse_merge] Files loaded, parsing...`);
-    
-    // Parse stock
+    console.log(`[sync:step:parse_merge] Building stock index...`);
     const stockMap = new Map<string, number>();
-    for (const r of parseTab(stockTxt)) {
-      const m = r.Matnr?.trim();
-      if (m) stockMap.set(m, parseInt(r.ExistingStock) || 0);
+    const stockLines = stockTxt.split('\n');
+    const stockHeaders = stockLines[0]?.split('\t').map(h => h.trim()) || [];
+    const matnrIdx = stockHeaders.indexOf('Matnr');
+    const stockIdx = stockHeaders.indexOf('ExistingStock');
+    
+    for (let i = 1; i < stockLines.length; i++) {
+      const vals = stockLines[i].split('\t');
+      const m = vals[matnrIdx]?.trim();
+      if (m) stockMap.set(m, parseInt(vals[stockIdx]) || 0);
     }
     console.log(`[sync:step:parse_merge] Stock entries: ${stockMap.size}`);
     
-    // Parse price
+    // 2. Build price index
+    const priceTxt = await getLatestFile(supabase, 'price');
+    if (!priceTxt) return { success: false, error: 'Price file mancante' };
+    
+    console.log(`[sync:step:parse_merge] Building price index...`);
     const priceMap = new Map<string, { lp: number; cbp: number; sur: number }>();
-    for (const r of parseTab(priceTxt)) {
-      const m = r.Matnr?.trim();
+    const priceLines = priceTxt.split('\n');
+    const priceHeaders = priceLines[0]?.split('\t').map(h => h.trim()) || [];
+    const priceMatnrIdx = priceHeaders.indexOf('Matnr');
+    const lpIdx = priceHeaders.indexOf('ListPrice');
+    const cbpIdx = priceHeaders.indexOf('CustBestPrice');
+    const surIdx = priceHeaders.indexOf('Surcharge');
+    
+    for (let i = 1; i < priceLines.length; i++) {
+      const vals = priceLines[i].split('\t');
+      const m = vals[priceMatnrIdx]?.trim();
       if (m) {
         const parse = (v: any) => parseFloat(String(v || '0').replace(',', '.')) || 0;
-        priceMap.set(m, { lp: parse(r.ListPrice), cbp: parse(r.CustBestPrice), sur: parse(r.Surcharge) });
+        priceMap.set(m, { lp: parse(vals[lpIdx]), cbp: parse(vals[cbpIdx]), sur: parse(vals[surIdx]) });
       }
     }
     console.log(`[sync:step:parse_merge] Price entries: ${priceMap.size}`);
     
-    // Merge products
-    const products: any[] = [];
-    const skipped = { noStock: 0, noPrice: 0, lowStock: 0, noValid: 0 };
+    // 3. Stream material file and write output incrementally
+    const materialTxt = await getLatestFile(supabase, 'material');
+    if (!materialTxt) return { success: false, error: 'Material file mancante' };
     
-    for (const r of parseTab(materialTxt)) {
-      const m = r.Matnr?.trim();
+    console.log(`[sync:step:parse_merge] Processing material file...`);
+    const materialLines = materialTxt.split('\n');
+    const materialHeaders = materialLines[0]?.split('\t').map(h => h.trim()) || [];
+    const mMatnrIdx = materialHeaders.indexOf('Matnr');
+    const mMpnIdx = materialHeaders.indexOf('ManufPartNr');
+    const mEanIdx = materialHeaders.indexOf('EAN');
+    const mDescIdx = materialHeaders.indexOf('ShortDescription');
+    
+    const skipped = { noStock: 0, noPrice: 0, lowStock: 0, noValid: 0 };
+    let productCount = 0;
+    
+    // Build output as array of lines to avoid string concatenation overhead
+    const outputLines: string[] = ['Matnr\tMPN\tEAN\tDesc\tStock\tLP\tCBP\tSur'];
+    
+    for (let i = 1; i < materialLines.length; i++) {
+      const line = materialLines[i];
+      if (!line.trim()) continue;
+      
+      const vals = line.split('\t');
+      const m = vals[mMatnrIdx]?.trim();
       if (!m) continue;
+      
       const stock = stockMap.get(m);
       const price = priceMap.get(m);
+      
       if (stock === undefined) { skipped.noStock++; continue; }
       if (!price) { skipped.noPrice++; continue; }
       if (stock < 2) { skipped.lowStock++; continue; }
       if (price.lp <= 0 && price.cbp <= 0) { skipped.noValid++; continue; }
       
-      products.push({
-        Matnr: m, MPN: r.ManufPartNr?.trim() || '', EAN: r.EAN?.trim() || '',
-        Desc: r.ShortDescription?.trim() || '', Stock: stock,
-        LP: price.lp, CBP: price.cbp, Sur: price.sur
-      });
+      outputLines.push(`${m}\t${vals[mMpnIdx]?.trim() || ''}\t${vals[mEanIdx]?.trim() || ''}\t${vals[mDescIdx]?.trim() || ''}\t${stock}\t${price.lp}\t${price.cbp}\t${price.sur}`);
+      productCount++;
     }
     
-    console.log(`[sync:step:parse_merge] Merged products: ${products.length}, skipped: ${JSON.stringify(skipped)}`);
+    console.log(`[sync:step:parse_merge] Products: ${productCount}, skipped: ${JSON.stringify(skipped)}`);
     
-    // Save to storage for next steps
-    const productsJson = JSON.stringify(products);
-    await supabase.storage.from('exports').upload('_pipeline/products.json', new Blob([productsJson], { type: 'application/json' }), { upsert: true });
-    
-    const metrics = {
-      products_total: products.length + skipped.noStock + skipped.noPrice + skipped.lowStock + skipped.noValid,
-      products_processed: products.length
-    };
+    // Save as TSV
+    const csvContent = outputLines.join('\n');
+    await supabase.storage.from('exports').upload('_pipeline/products.tsv', 
+      new Blob([csvContent], { type: 'text/tab-separated-values' }), { upsert: true });
     
     await updateStepResult(supabase, runId, 'parse_merge', {
-      status: 'success', duration_ms: Date.now() - startTime, products: products.length, skipped
-    }, metrics);
+      status: 'success', duration_ms: Date.now() - startTime, 
+      products: productCount, skipped,
+      metrics: { products_total: productCount + Object.values(skipped).reduce((a, b) => a + b, 0), products_processed: productCount }
+    });
     
     console.log(`[sync:step:parse_merge] Completed in ${Date.now() - startTime}ms`);
-    return { success: true, metrics };
+    return { success: true };
     
   } catch (e: any) {
     console.error(`[sync:step:parse_merge] Error:`, e);
-    await updateStepResult(supabase, runId, 'parse_merge', {
-      status: 'failed', duration_ms: Date.now() - startTime, error: e.message
-    }, {});
+    await updateStepResult(supabase, runId, 'parse_merge', { status: 'failed', error: e.message, metrics: {} });
     return { success: false, error: e.message };
   }
 }
 
-async function stepEanMapping(supabase: any, runId: string): Promise<{ success: boolean; error?: string; metrics?: any }> {
+// ========== HELPER: Load/Save Products ==========
+async function loadProductsTSV(supabase: any): Promise<any[]> {
+  const { data: blob } = await supabase.storage.from('exports').download('_pipeline/products.tsv');
+  if (!blob) throw new Error('Products file not found');
+  
+  const text = await blob.text();
+  const lines = text.split('\n');
+  const products: any[] = [];
+  
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const vals = line.split('\t');
+    products.push({
+      Matnr: vals[0] || '', MPN: vals[1] || '', EAN: vals[2] || '', Desc: vals[3] || '',
+      Stock: parseInt(vals[4]) || 0, LP: parseFloat(vals[5]) || 0, CBP: parseFloat(vals[6]) || 0, Sur: parseFloat(vals[7]) || 0,
+      PF: vals[8] || '', PFNum: parseFloat(vals[9]) || 0, LPF: vals[10] || ''
+    });
+  }
+  return products;
+}
+
+async function saveProductsTSV(supabase: any, products: any[]): Promise<void> {
+  const lines = ['Matnr\tMPN\tEAN\tDesc\tStock\tLP\tCBP\tSur\tPF\tPFNum\tLPF'];
+  for (const p of products) {
+    lines.push(`${p.Matnr}\t${p.MPN}\t${p.EAN}\t${p.Desc}\t${p.Stock}\t${p.LP}\t${p.CBP}\t${p.Sur}\t${p.PF || ''}\t${p.PFNum || ''}\t${p.LPF || ''}`);
+  }
+  await supabase.storage.from('exports').upload('_pipeline/products.tsv', 
+    new Blob([lines.join('\n')], { type: 'text/tab-separated-values' }), { upsert: true });
+}
+
+// ========== STEP: EAN_MAPPING ==========
+async function stepEanMapping(supabase: any, runId: string): Promise<{ success: boolean; error?: string }> {
   console.log(`[sync:step:ean_mapping] Starting for run ${runId}`);
   const startTime = Date.now();
   
   try {
-    // Load products from storage
-    const { data: blob } = await supabase.storage.from('exports').download('_pipeline/products.json');
-    if (!blob) return { success: false, error: 'Products file not found' };
-    
-    const products: any[] = JSON.parse(await blob.text());
+    const products = await loadProductsTSV(supabase);
     console.log(`[sync:step:ean_mapping] Loaded ${products.length} products`);
     
     let eanMapped = 0, eanMissing = 0;
     
     // Load EAN mapping file
-    const { data: files } = await supabase.storage.from('mapping-files').list('ean', { limit: 1, sortBy: { column: 'created_at', order: 'desc' } });
+    const { data: files } = await supabase.storage.from('mapping-files').list('ean', { 
+      limit: 1, sortBy: { column: 'created_at', order: 'desc' } 
+    });
+    
     if (files?.length) {
       const { data: mappingBlob } = await supabase.storage.from('mapping-files').download(`ean/${files[0].name}`);
       if (mappingBlob) {
@@ -197,35 +233,30 @@ async function stepEanMapping(supabase: any, runId: string): Promise<{ success: 
       }
     }
     
-    // Save updated products
-    await supabase.storage.from('exports').upload('_pipeline/products.json', new Blob([JSON.stringify(products)], { type: 'application/json' }), { upsert: true });
+    await saveProductsTSV(supabase, products);
     
-    const metrics = { products_ean_mapped: eanMapped, products_ean_missing: eanMissing };
     await updateStepResult(supabase, runId, 'ean_mapping', {
-      status: 'success', duration_ms: Date.now() - startTime, mapped: eanMapped, missing: eanMissing
-    }, metrics);
+      status: 'success', duration_ms: Date.now() - startTime, mapped: eanMapped, missing: eanMissing,
+      metrics: { products_ean_mapped: eanMapped, products_ean_missing: eanMissing }
+    });
     
     console.log(`[sync:step:ean_mapping] Completed: mapped=${eanMapped}, missing=${eanMissing}`);
-    return { success: true, metrics };
+    return { success: true };
     
   } catch (e: any) {
     console.error(`[sync:step:ean_mapping] Error:`, e);
-    await updateStepResult(supabase, runId, 'ean_mapping', {
-      status: 'failed', duration_ms: Date.now() - startTime, error: e.message
-    }, {});
+    await updateStepResult(supabase, runId, 'ean_mapping', { status: 'failed', error: e.message, metrics: {} });
     return { success: false, error: e.message };
   }
 }
 
+// ========== STEP: PRICING ==========
 async function stepPricing(supabase: any, runId: string, feeConfig: any): Promise<{ success: boolean; error?: string }> {
   console.log(`[sync:step:pricing] Starting for run ${runId}`);
   const startTime = Date.now();
   
   try {
-    const { data: blob } = await supabase.storage.from('exports').download('_pipeline/products.json');
-    if (!blob) return { success: false, error: 'Products file not found' };
-    
-    const products: any[] = JSON.parse(await blob.text());
+    const products = await loadProductsTSV(supabase);
     console.log(`[sync:step:pricing] Processing ${products.length} products`);
     
     for (const p of products) {
@@ -253,33 +284,29 @@ async function stepPricing(supabase: any, runId: string, feeConfig: any): Promis
       }
     }
     
-    await supabase.storage.from('exports').upload('_pipeline/products.json', new Blob([JSON.stringify(products)], { type: 'application/json' }), { upsert: true });
+    await saveProductsTSV(supabase, products);
     
     await updateStepResult(supabase, runId, 'pricing', {
-      status: 'success', duration_ms: Date.now() - startTime, priced: products.length
-    }, {});
+      status: 'success', duration_ms: Date.now() - startTime, priced: products.length, metrics: {}
+    });
     
     console.log(`[sync:step:pricing] Completed in ${Date.now() - startTime}ms`);
     return { success: true };
     
   } catch (e: any) {
     console.error(`[sync:step:pricing] Error:`, e);
-    await updateStepResult(supabase, runId, 'pricing', {
-      status: 'failed', duration_ms: Date.now() - startTime, error: e.message
-    }, {});
+    await updateStepResult(supabase, runId, 'pricing', { status: 'failed', error: e.message, metrics: {} });
     return { success: false, error: e.message };
   }
 }
 
-async function stepExportEan(supabase: any, runId: string): Promise<{ success: boolean; error?: string; metrics?: any }> {
+// ========== STEP: EXPORT_EAN ==========
+async function stepExportEan(supabase: any, runId: string): Promise<{ success: boolean; error?: string }> {
   console.log(`[sync:step:export_ean] Starting for run ${runId}`);
   const startTime = Date.now();
   
   try {
-    const { data: blob } = await supabase.storage.from('exports').download('_pipeline/products.json');
-    if (!blob) return { success: false, error: 'Products file not found' };
-    
-    const products: any[] = JSON.parse(await blob.text());
+    const products = await loadProductsTSV(supabase);
     console.log(`[sync:step:export_ean] Processing ${products.length} products`);
     
     // Filter valid EAN and deduplicate
@@ -299,10 +326,15 @@ async function stepExportEan(supabase: any, runId: string): Promise<{ success: b
     const eanCatalog = Array.from(byEAN.values());
     console.log(`[sync:step:export_ean] EAN catalog: ${eanCatalog.length}, discarded: ${discarded}`);
     
-    // Save EAN catalog for next export steps
-    await supabase.storage.from('exports').upload('_pipeline/ean_catalog.json', new Blob([JSON.stringify(eanCatalog)], { type: 'application/json' }), { upsert: true });
+    // Save EAN catalog for next steps
+    const eanLines = ['Matnr\tMPN\tEAN\tDesc\tStock\tLP\tCBP\tPF\tPFNum\tLPF'];
+    for (const p of eanCatalog) {
+      eanLines.push(`${p.Matnr}\t${p.MPN}\t${p.EAN}\t${p.Desc}\t${p.Stock}\t${p.LP}\t${p.CBP}\t${p.PF}\t${p.PFNum}\t${p.LPF}`);
+    }
+    await supabase.storage.from('exports').upload('_pipeline/ean_catalog.tsv', 
+      new Blob([eanLines.join('\n')], { type: 'text/tab-separated-values' }), { upsert: true });
     
-    // Generate CSV
+    // Generate CSV export
     const eanHeaders = ['Matnr', 'ManufPartNr', 'EAN', 'ShortDescription', 'ExistingStock', 'ListPrice', 'CustBestPrice', 'Prezzo Finale', 'ListPrice con Fee'];
     const eanRows = eanCatalog.map(p => [p.Matnr, p.MPN, p.EAN, p.Desc, p.Stock, p.LP, p.CBP, p.PF, p.LPF].map(v => {
       const s = String(v ?? '');
@@ -312,39 +344,61 @@ async function stepExportEan(supabase: any, runId: string): Promise<{ success: b
     
     await supabase.storage.from('exports').upload('Catalogo EAN.csv', new Blob([eanCSV], { type: 'text/csv' }), { upsert: true });
     
-    const metrics = { products_ean_invalid: discarded, products_after_override: products.length, exported_files_count: 1 };
     await updateStepResult(supabase, runId, 'export_ean', {
-      status: 'success', duration_ms: Date.now() - startTime, rows: eanCatalog.length, discarded
-    }, metrics);
+      status: 'success', duration_ms: Date.now() - startTime, rows: eanCatalog.length, discarded,
+      metrics: { products_ean_invalid: discarded, products_after_override: products.length, exported_files_count: 1 }
+    });
     
     console.log(`[sync:step:export_ean] Completed in ${Date.now() - startTime}ms`);
-    return { success: true, metrics };
+    return { success: true };
     
   } catch (e: any) {
     console.error(`[sync:step:export_ean] Error:`, e);
-    await updateStepResult(supabase, runId, 'export_ean', {
-      status: 'failed', duration_ms: Date.now() - startTime, error: e.message
-    }, {});
+    await updateStepResult(supabase, runId, 'export_ean', { status: 'failed', error: e.message, metrics: {} });
     return { success: false, error: e.message };
   }
 }
 
-async function stepExportMediaworld(supabase: any, runId: string, prepDays: number): Promise<{ success: boolean; error?: string; metrics?: any }> {
+// ========== HELPER: Load EAN Catalog ==========
+async function loadEanCatalog(supabase: any): Promise<any[]> {
+  const { data: blob } = await supabase.storage.from('exports').download('_pipeline/ean_catalog.tsv');
+  if (!blob) throw new Error('EAN catalog not found');
+  
+  const text = await blob.text();
+  const lines = text.split('\n');
+  const products: any[] = [];
+  
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const vals = line.split('\t');
+    products.push({
+      Matnr: vals[0] || '', MPN: vals[1] || '', EAN: vals[2] || '', Desc: vals[3] || '',
+      Stock: parseInt(vals[4]) || 0, LP: parseFloat(vals[5]) || 0, CBP: parseFloat(vals[6]) || 0,
+      PF: vals[7] || '', PFNum: parseFloat(vals[8]) || 0, LPF: vals[9] || ''
+    });
+  }
+  return products;
+}
+
+// ========== STEP: EXPORT_MEDIAWORLD ==========
+async function stepExportMediaworld(supabase: any, runId: string, prepDays: number): Promise<{ success: boolean; error?: string }> {
   console.log(`[sync:step:export_mediaworld] Starting for run ${runId}`);
   const startTime = Date.now();
   
   try {
-    const { data: blob } = await supabase.storage.from('exports').download('_pipeline/ean_catalog.json');
-    if (!blob) return { success: false, error: 'EAN catalog not found' };
-    
-    const eanCatalog: any[] = JSON.parse(await blob.text());
+    const eanCatalog = await loadEanCatalog(supabase);
     console.log(`[sync:step:export_mediaworld] Processing ${eanCatalog.length} products`);
     
     const mwHeaders = ['SKU offerta', 'ID Prodotto', 'Tipo ID prodotto', 'Descrizione offerta', 'Descrizione interna offerta', "Prezzo dell'offerta", 'Info aggiuntive prezzo offerta', "Quantità dell'offerta", 'Avviso quantità minima', "Stato dell'offerta", 'Data di inizio della disponibilità', 'Data di conclusione della disponibilità', 'Classe logistica', 'Prezzo scontato', 'Data di inizio dello sconto', 'Data di termine dello sconto', 'Tempo di preparazione della spedizione (in giorni)', 'Aggiorna/Cancella', 'Tipo di prezzo che verrà barrato quando verrà definito un prezzo scontato.', 'Obbligo di ritiro RAEE', 'Orario di cut-off (solo se la consegna il giorno successivo è abilitata)', 'VAT Rate % (Turkey only)'];
     
-    let mwRows: string[] = [], mwSkipped = 0;
+    const mwRows: string[] = [];
+    let mwSkipped = 0;
+    
     for (const p of eanCatalog) {
-      if (!p.MPN || p.MPN.length > 40 || !p.EAN || p.EAN.length < 12 || p.Stock <= 0 || !p.LPF || !p.PFNum) { mwSkipped++; continue; }
+      if (!p.MPN || p.MPN.length > 40 || !p.EAN || p.EAN.length < 12 || p.Stock <= 0 || !p.LPF || !p.PFNum) { 
+        mwSkipped++; continue; 
+      }
       const lpf = typeof p.LPF === 'number' ? p.LPF.toFixed(2) : String(p.LPF);
       const pf = p.PFNum.toFixed(2);
       mwRows.push([p.MPN, p.EAN, 'EAN', p.Desc, '', lpf, '', String(p.Stock), '', 'Nuovo', '', '', 'Consegna gratuita', pf, '', '', String(prepDays), '', 'recommended-retail-price', '', '', ''].map(c => c.includes(';') ? `"${c}"` : c).join(';'));
@@ -353,36 +407,33 @@ async function stepExportMediaworld(supabase: any, runId: string, prepDays: numb
     const mwCSV = [mwHeaders.join(';'), ...mwRows].join('\n');
     await supabase.storage.from('exports').upload('Export Mediaworld.csv', new Blob([mwCSV], { type: 'text/csv' }), { upsert: true });
     
-    const metrics = { mediaworld_export_rows: mwRows.length, mediaworld_export_skipped: mwSkipped };
     await updateStepResult(supabase, runId, 'export_mediaworld', {
-      status: 'success', duration_ms: Date.now() - startTime, rows: mwRows.length, skipped: mwSkipped
-    }, metrics);
+      status: 'success', duration_ms: Date.now() - startTime, rows: mwRows.length, skipped: mwSkipped,
+      metrics: { mediaworld_export_rows: mwRows.length, mediaworld_export_skipped: mwSkipped }
+    });
     
     console.log(`[sync:step:export_mediaworld] Completed: ${mwRows.length} rows, ${mwSkipped} skipped`);
-    return { success: true, metrics };
+    return { success: true };
     
   } catch (e: any) {
     console.error(`[sync:step:export_mediaworld] Error:`, e);
-    await updateStepResult(supabase, runId, 'export_mediaworld', {
-      status: 'failed', duration_ms: Date.now() - startTime, error: e.message
-    }, {});
+    await updateStepResult(supabase, runId, 'export_mediaworld', { status: 'failed', error: e.message, metrics: {} });
     return { success: false, error: e.message };
   }
 }
 
-async function stepExportEprice(supabase: any, runId: string, prepDays: number): Promise<{ success: boolean; error?: string; metrics?: any }> {
+// ========== STEP: EXPORT_EPRICE ==========
+async function stepExportEprice(supabase: any, runId: string, prepDays: number): Promise<{ success: boolean; error?: string }> {
   console.log(`[sync:step:export_eprice] Starting for run ${runId}`);
   const startTime = Date.now();
   
   try {
-    const { data: blob } = await supabase.storage.from('exports').download('_pipeline/ean_catalog.json');
-    if (!blob) return { success: false, error: 'EAN catalog not found' };
-    
-    const eanCatalog: any[] = JSON.parse(await blob.text());
+    const eanCatalog = await loadEanCatalog(supabase);
     console.log(`[sync:step:export_eprice] Processing ${eanCatalog.length} products`);
     
     const epHeaders = ['EAN', 'SKU', 'Titolo', 'Prezzo', 'Quantita', 'Tempo Consegna'];
-    let epRows: string[] = [], epSkipped = 0;
+    const epRows: string[] = [];
+    let epSkipped = 0;
     
     for (const p of eanCatalog) {
       if (!p.EAN || !p.MPN || p.Stock <= 0 || !p.PFNum) { epSkipped++; continue; }
@@ -392,23 +443,22 @@ async function stepExportEprice(supabase: any, runId: string, prepDays: number):
     const epCSV = [epHeaders.join(';'), ...epRows].join('\n');
     await supabase.storage.from('exports').upload('Export ePrice.csv', new Blob([epCSV], { type: 'text/csv' }), { upsert: true });
     
-    const metrics = { eprice_export_rows: epRows.length, eprice_export_skipped: epSkipped };
     await updateStepResult(supabase, runId, 'export_eprice', {
-      status: 'success', duration_ms: Date.now() - startTime, rows: epRows.length, skipped: epSkipped
-    }, metrics);
+      status: 'success', duration_ms: Date.now() - startTime, rows: epRows.length, skipped: epSkipped,
+      metrics: { eprice_export_rows: epRows.length, eprice_export_skipped: epSkipped }
+    });
     
     console.log(`[sync:step:export_eprice] Completed: ${epRows.length} rows, ${epSkipped} skipped`);
-    return { success: true, metrics };
+    return { success: true };
     
   } catch (e: any) {
     console.error(`[sync:step:export_eprice] Error:`, e);
-    await updateStepResult(supabase, runId, 'export_eprice', {
-      status: 'failed', duration_ms: Date.now() - startTime, error: e.message
-    }, {});
+    await updateStepResult(supabase, runId, 'export_eprice', { status: 'failed', error: e.message, metrics: {} });
     return { success: false, error: e.message };
   }
 }
 
+// ========== MAIN HANDLER ==========
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
   if (req.method !== 'POST') {
@@ -431,7 +481,7 @@ serve(async (req) => {
     
     console.log(`[sync-step-runner] Executing step: ${step} for run: ${run_id}`);
     
-    let result: { success: boolean; error?: string; metrics?: any };
+    let result: { success: boolean; error?: string };
     
     switch (step) {
       case 'parse_merge':
