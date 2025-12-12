@@ -1017,9 +1017,14 @@ async function stepExportEan(supabase: any, runId: string): Promise<{ success: b
   }
 }
 
-// ========== STEP: EXPORT_MEDIAWORLD ==========
-async function stepExportMediaworld(supabase: any, runId: string, prepDays: number): Promise<{ success: boolean; error?: string }> {
-  console.log(`[sync:step:export_mediaworld] Starting for run ${runId}, prepDays=${prepDays}`);
+// ========== STEP: EXPORT_MEDIAWORLD (with IT/EU stock support) ==========
+async function stepExportMediaworld(supabase: any, runId: string, feeConfig: any): Promise<{ success: boolean; error?: string }> {
+  const prepDays = feeConfig?.mediaworldItPrepDays || feeConfig?.mediaworldPrepDays || 3;
+  const includeEu = feeConfig?.mediaworldIncludeEu || false;
+  const itDays = feeConfig?.mediaworldItPrepDays || 3;
+  const euDays = feeConfig?.mediaworldEuPrepDays || 5;
+  
+  console.log(`[sync:step:export_mediaworld] Starting for run ${runId}, IT days=${itDays}, EU days=${euDays}, includeEU=${includeEu}`);
   const startTime = Date.now();
   
   try {
@@ -1031,30 +1036,81 @@ async function stepExportMediaworld(supabase: any, runId: string, prepDays: numb
       return { success: false, error };
     }
     
+    // Load stock location index from per-run file
+    let stockLocationIndex: Record<string, { stockIT: number; stockEU: number }> | null = null;
+    const stockLocationPath = `stock-location/runs/${runId}.txt`;
+    const { content: stockLocationContent } = await downloadFromStorage(supabase, 'ftp-import', stockLocationPath);
+    
+    if (stockLocationContent) {
+      stockLocationIndex = {};
+      const lines = stockLocationContent.replace(/\r\n/g, '\n').split('\n');
+      const headers = lines[0]?.split(';').map((h: string) => h.trim().toLowerCase()) || [];
+      const matnrIdx = headers.indexOf('matnr');
+      const stockIdx = headers.indexOf('stock');
+      const locationIdx = headers.indexOf('locationid');
+      
+      if (matnrIdx >= 0 && stockIdx >= 0 && locationIdx >= 0) {
+        for (let i = 1; i < lines.length; i++) {
+          const vals = lines[i].split(';');
+          const matnr = vals[matnrIdx]?.trim();
+          if (!matnr) continue;
+          const stock = parseInt(vals[stockIdx]) || 0;
+          const locationId = parseInt(vals[locationIdx]) || 0;
+          
+          if (!stockLocationIndex[matnr]) stockLocationIndex[matnr] = { stockIT: 0, stockEU: 0 };
+          if (locationId === 4242) stockLocationIndex[matnr].stockIT += stock;
+          else if (locationId === 4254) stockLocationIndex[matnr].stockEU += stock;
+        }
+        console.log(`[sync:step:export_mediaworld] Loaded stock location: ${Object.keys(stockLocationIndex).length} entries`);
+      }
+    }
+    
     const mwRows: string[] = [];
     let mwSkipped = 0;
     
-    const leadTime = prepDays + 2;
     const headers = ['sku', 'ean', 'price', 'leadtime-to-ship', 'quantity'];
     
     for (const p of products) {
       const norm = normalizeEAN(p.EAN);
-      if (!norm.ok) {
-        mwSkipped++;
-        continue;
+      if (!norm.ok) { mwSkipped++; continue; }
+      if (!p.PFNum || p.PFNum <= 0) { mwSkipped++; continue; }
+      
+      // IT/EU stock resolution
+      let stockIT = p.Stock || 0;
+      let stockEU = 0;
+      if (stockLocationIndex && stockLocationIndex[p.Matnr]) {
+        stockIT = stockLocationIndex[p.Matnr].stockIT;
+        stockEU = stockLocationIndex[p.Matnr].stockEU;
       }
       
-      if (!p.PFNum || p.PFNum <= 0) {
-        mwSkipped++;
-        continue;
+      let exportQty: number, leadDays: number, shouldExport: boolean;
+      if (!includeEu) {
+        exportQty = stockIT;
+        shouldExport = exportQty >= 2;
+        leadDays = shouldExport ? itDays : 0;
+      } else {
+        if (stockIT >= 2) {
+          exportQty = stockIT;
+          leadDays = itDays;
+          shouldExport = true;
+        } else {
+          exportQty = stockIT + stockEU;
+          shouldExport = exportQty >= 2;
+          leadDays = shouldExport ? euDays : 0;
+        }
       }
+      
+      if (!shouldExport) { mwSkipped++; continue; }
+      
+      // Mediaworld server-side: leadtime-to-ship = leadDays + 2
+      const leadTimeToShip = leadDays + 2;
       
       mwRows.push([
         p.Matnr || '',
         norm.value,
         p.PFNum.toFixed(2).replace('.', ','),
-        String(leadTime),
-        String(Math.min(p.Stock || 0, 99))
+        String(leadTimeToShip),
+        String(Math.min(exportQty, 99))
       ].join(';'));
     }
     
@@ -1082,9 +1138,13 @@ async function stepExportMediaworld(supabase: any, runId: string, prepDays: numb
   }
 }
 
-// ========== STEP: EXPORT_EPRICE ==========
-async function stepExportEprice(supabase: any, runId: string, prepDays: number): Promise<{ success: boolean; error?: string }> {
-  console.log(`[sync:step:export_eprice] Starting for run ${runId}, prepDays=${prepDays}`);
+// ========== STEP: EXPORT_EPRICE (with IT/EU stock support) ==========
+async function stepExportEprice(supabase: any, runId: string, feeConfig: any): Promise<{ success: boolean; error?: string }> {
+  const includeEu = feeConfig?.epriceIncludeEu || false;
+  const itDays = feeConfig?.epriceItPrepDays || feeConfig?.epricePrepDays || 1;
+  const euDays = feeConfig?.epriceEuPrepDays || 3;
+  
+  console.log(`[sync:step:export_eprice] Starting for run ${runId}, IT days=${itDays}, EU days=${euDays}, includeEU=${includeEu}`);
   const startTime = Date.now();
   
   try {
@@ -1096,33 +1156,80 @@ async function stepExportEprice(supabase: any, runId: string, prepDays: number):
       return { success: false, error };
     }
     
+    // Load stock location (same as Mediaworld)
+    let stockLocationIndex: Record<string, { stockIT: number; stockEU: number }> | null = null;
+    const stockLocationPath = `stock-location/runs/${runId}.txt`;
+    const { content: stockLocationContent } = await downloadFromStorage(supabase, 'ftp-import', stockLocationPath);
+    
+    if (stockLocationContent) {
+      stockLocationIndex = {};
+      const lines = stockLocationContent.replace(/\r\n/g, '\n').split('\n');
+      const headers = lines[0]?.split(';').map((h: string) => h.trim().toLowerCase()) || [];
+      const matnrIdx = headers.indexOf('matnr');
+      const stockIdx = headers.indexOf('stock');
+      const locationIdx = headers.indexOf('locationid');
+      
+      if (matnrIdx >= 0 && stockIdx >= 0 && locationIdx >= 0) {
+        for (let i = 1; i < lines.length; i++) {
+          const vals = lines[i].split(';');
+          const matnr = vals[matnrIdx]?.trim();
+          if (!matnr) continue;
+          const stock = parseInt(vals[stockIdx]) || 0;
+          const locationId = parseInt(vals[locationIdx]) || 0;
+          
+          if (!stockLocationIndex[matnr]) stockLocationIndex[matnr] = { stockIT: 0, stockEU: 0 };
+          if (locationId === 4242) stockLocationIndex[matnr].stockIT += stock;
+          else if (locationId === 4254) stockLocationIndex[matnr].stockEU += stock;
+        }
+      }
+    }
+    
     const epRows: string[] = [];
     let epSkipped = 0;
-    
-    const headers = ['sku', 'ean', 'price', 'quantity', 'leadtime'];
+    const exportHeaders = ['sku', 'ean', 'price', 'quantity', 'leadtime'];
     
     for (const p of products) {
       const norm = normalizeEAN(p.EAN);
-      if (!norm.ok) {
-        epSkipped++;
-        continue;
+      if (!norm.ok) { epSkipped++; continue; }
+      if (!p.PFNum || p.PFNum <= 0) { epSkipped++; continue; }
+      
+      // IT/EU stock resolution (same logic as Mediaworld but without +2)
+      let stockIT = p.Stock || 0;
+      let stockEU = 0;
+      if (stockLocationIndex && stockLocationIndex[p.Matnr]) {
+        stockIT = stockLocationIndex[p.Matnr].stockIT;
+        stockEU = stockLocationIndex[p.Matnr].stockEU;
       }
       
-      if (!p.PFNum || p.PFNum <= 0) {
-        epSkipped++;
-        continue;
+      let exportQty: number, leadDays: number, shouldExport: boolean;
+      if (!includeEu) {
+        exportQty = stockIT;
+        shouldExport = exportQty >= 2;
+        leadDays = shouldExport ? itDays : 0;
+      } else {
+        if (stockIT >= 2) {
+          exportQty = stockIT;
+          leadDays = itDays;
+          shouldExport = true;
+        } else {
+          exportQty = stockIT + stockEU;
+          shouldExport = exportQty >= 2;
+          leadDays = shouldExport ? euDays : 0;
+        }
       }
+      
+      if (!shouldExport) { epSkipped++; continue; }
       
       epRows.push([
         p.Matnr || '',
         norm.value,
         p.PFNum.toFixed(2).replace('.', ','),
-        String(Math.min(p.Stock || 0, 99)),
-        String(prepDays)
+        String(Math.min(exportQty, 99)),
+        String(leadDays)  // ePrice: no +2
       ].join(';'));
     }
     
-    const epCSV = [headers.join(';'), ...epRows].join('\n');
+    const epCSV = [exportHeaders.join(';'), ...epRows].join('\n');
     const saveResult = await uploadToStorage(supabase, 'exports', 'Export ePrice.csv', epCSV, 'text/csv');
     
     if (!saveResult.success) {
@@ -1187,10 +1294,10 @@ serve(async (req) => {
         result = await stepExportEan(supabase, run_id);
         break;
       case 'export_mediaworld':
-        result = await stepExportMediaworld(supabase, run_id, fee_config?.mediaworldPrepDays || 3);
+        result = await stepExportMediaworld(supabase, run_id, fee_config);
         break;
       case 'export_eprice':
-        result = await stepExportEprice(supabase, run_id, fee_config?.epricePrepDays || 1);
+        result = await stepExportEprice(supabase, run_id, fee_config);
         break;
       default:
         return new Response(JSON.stringify({ status: 'error', message: `Unknown step: ${step}` }), 

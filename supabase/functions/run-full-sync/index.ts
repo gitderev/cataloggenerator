@@ -186,31 +186,53 @@ serve(async (req) => {
       feeMkt: feeData?.fee_mkt ?? 1.08,
       shippingCost: feeData?.shipping_cost ?? 6.00,
       mediaworldPrepDays: feeData?.mediaworld_preparation_days ?? 3,
-      epricePrepDays: feeData?.eprice_preparation_days ?? 1
+      epricePrepDays: feeData?.eprice_preparation_days ?? 1,
+      // IT/EU stock config
+      mediaworldIncludeEu: feeData?.mediaworld_include_eu ?? false,
+      mediaworldItPrepDays: feeData?.mediaworld_it_preparation_days ?? 3,
+      mediaworldEuPrepDays: feeData?.mediaworld_eu_preparation_days ?? 5,
+      epriceIncludeEu: feeData?.eprice_include_eu ?? false,
+      epriceItPrepDays: feeData?.eprice_it_preparation_days ?? 1,
+      epriceEuPrepDays: feeData?.eprice_eu_preparation_days ?? 3
     };
 
     runId = crypto.randomUUID();
     startTime = Date.now();
     await supabase.from('sync_runs').insert({ 
       id: runId, started_at: new Date().toISOString(), status: 'running', 
-      trigger_type: trigger, attempt: 1, steps: { current_step: 'import_ftp' }, metrics: {} 
+      trigger_type: trigger, attempt: 1, steps: { current_step: 'import_ftp' }, metrics: {},
+      location_warnings: {}
     });
     console.log(`[orchestrator] Run created: ${runId}`);
 
-    // ========== STEP 1: FTP Import ==========
+    // ========== STEP 1: FTP Import (including stock location) ==========
     await updateRun(supabase, runId, { steps: { current_step: 'import_ftp' } });
     console.log('[orchestrator] === STEP 1: FTP Import ===');
     
-    for (const fileType of ['material', 'stock', 'price']) {
+    for (const fileType of ['material', 'stock', 'price', 'stockLocation']) {
       if (await isCancelRequested(supabase, runId)) {
         await finalizeRun(supabase, runId, 'failed', startTime, 'Interrotta dall\'utente');
         return new Response(JSON.stringify({ status: 'cancelled' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
       
-      const result = await callStep(supabaseUrl, supabaseServiceKey, 'import-catalog-ftp', { fileType });
-      if (!result.success) {
+      const result = await callStep(supabaseUrl, supabaseServiceKey, 'import-catalog-ftp', { 
+        fileType,
+        run_id: runId // Pass run_id for per-run stock location storage
+      });
+      
+      // Stock location failure is non-blocking - use fallback compatibility
+      if (!result.success && fileType !== 'stockLocation') {
         await finalizeRun(supabase, runId, 'failed', startTime, `FTP ${fileType}: ${result.error}`);
         return new Response(JSON.stringify({ status: 'failed', error: result.error }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      
+      if (!result.success && fileType === 'stockLocation') {
+        console.log(`[orchestrator] Stock location import failed (non-blocking): ${result.error}`);
+        // Update location_warnings for missing file
+        const { data: run } = await supabase.from('sync_runs').select('location_warnings').eq('id', runId).single();
+        const warnings = run?.location_warnings || {};
+        warnings.missing_location_file = 1;
+        await supabase.from('sync_runs').update({ location_warnings: warnings }).eq('id', runId);
       }
     }
 

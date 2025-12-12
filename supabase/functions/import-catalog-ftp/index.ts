@@ -23,9 +23,13 @@ const FILE_CONFIG = {
   material: { ftpName: "MaterialFile.txt", folder: "material", prefix: "MaterialFile", key: "materialFile" },
   stock: { ftpName: "StockFileData_790813.txt", folder: "stock", prefix: "StockFileData", key: "stockFile" },
   price: { ftpName: "pricefileData_790813.txt", folder: "price", prefix: "pricefileData", key: "priceFile" },
+  stockLocation: { ftpPattern: /^790813_StockFile_(\d{8})\.txt$/, folder: "stock-location", prefix: "790813_StockFile", key: "stockLocationFile" },
 } as const;
 
 type FileType = keyof typeof FILE_CONFIG;
+
+// Stock location file pattern
+const STOCK_LOCATION_REGEX = /^790813_StockFile_(\d{8})\.txt$/;
 
 const BUCKET_NAME = "ftp-import";
 
@@ -216,6 +220,64 @@ class FTPClient {
     return result;
   }
 
+  async listFiles(): Promise<Array<{ name: string; modified?: Date }>> {
+    console.log(`[FTPClient] Listing directory files...`);
+    
+    const { host, port } = await this.setPassiveMode();
+    const dataConn = await Deno.connect({ hostname: host, port });
+    
+    const listResp = await this.sendCommand("LIST");
+    const { code: listCode, message: listMessage } = this.parseResponse(listResp);
+    
+    if (listCode !== 125 && listCode !== 150) {
+      try { dataConn.close(); } catch (_) {}
+      console.error(`[FTPClient] LIST failed: ${listMessage}`);
+      throw new Error(`FTP LIST failed (code ${listCode})`);
+    }
+    
+    const chunks: Uint8Array[] = [];
+    let totalSize = 0;
+    
+    try {
+      const buf = new Uint8Array(8192);
+      while (true) {
+        const n = await dataConn.read(buf);
+        if (n === null) break;
+        chunks.push(buf.slice(0, n));
+        totalSize += n;
+      }
+    } catch (_e) {}
+    
+    try { dataConn.close(); } catch (_) {}
+    try { await this.readResponse(); } catch (_) {}
+    
+    const result = new Uint8Array(totalSize);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+    
+    const listOutput = new TextDecoder().decode(result);
+    const lines = listOutput.split(/\r?\n/).filter(l => l.trim());
+    
+    const files: Array<{ name: string; modified?: Date }> = [];
+    for (const line of lines) {
+      // Parse LIST output (Unix-style: permissions, size, date, name)
+      const parts = line.trim().split(/\s+/);
+      if (parts.length >= 9) {
+        const name = parts.slice(8).join(' ');
+        files.push({ name });
+      } else if (parts.length >= 1) {
+        // Simple filename only
+        files.push({ name: parts[parts.length - 1] });
+      }
+    }
+    
+    console.log(`[FTPClient] Listed ${files.length} files`);
+    return files;
+  }
+
   async close(): Promise<void> {
     if (this.conn) {
       try { await this.sendCommand("QUIT"); } catch (_) {}
@@ -228,8 +290,6 @@ class FTPClient {
     }
   }
 }
-
-// Authentication check: verify user is authenticated and is admin OR service role
 async function checkAuth(req: Request, supabaseUrl: string, supabaseAnonKey: string, supabaseServiceKey: string): Promise<{ authorized: boolean; error?: string; status?: number; isServiceRole?: boolean }> {
   const authHeader = req.headers.get('authorization');
   
@@ -321,19 +381,21 @@ serve(async (req) => {
     const fileType = body.fileType as string | undefined;
 
     // Validate fileType
-    if (!fileType || !["material", "stock", "price"].includes(fileType)) {
+    if (!fileType || !["material", "stock", "price", "stockLocation"].includes(fileType)) {
       return new Response(
         JSON.stringify({ 
           status: "error", 
           code: "INVALID_FILE_TYPE", 
-          message: "fileType deve essere uno tra: material, stock, price." 
+          message: "fileType deve essere uno tra: material, stock, price, stockLocation." 
         } as ErrorResponse),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const config = FILE_CONFIG[fileType as FileType];
-    console.log(`[import-catalog-ftp] Processing file: ${fileType} -> ${config.ftpName}`);
+    // Get optional run_id for per-run file storage
+    const runId = body.run_id as string | undefined;
+    
+    console.log(`[import-catalog-ftp] Processing file: ${fileType}${runId ? ` (run: ${runId})` : ''}`);
 
     // Read FTP environment variables and log diagnostic info
     const ftpHost = Deno.env.get('FTP_HOST');
@@ -379,6 +441,126 @@ serve(async (req) => {
 
     const timestamp = Date.now();
 
+    // Handle stockLocation differently - needs to list files and select latest
+    if (fileType === 'stockLocation') {
+      console.log(`[import-catalog-ftp] Stock location mode: listing files...`);
+      
+      let fileBuffer: Uint8Array;
+      let selectedFilename = '';
+      
+      try {
+        // List files and find latest stock location file
+        const files = await client.listFiles();
+        console.log(`[import-catalog-ftp] Found ${files.length} files in directory`);
+        
+        // Filter files matching the stock location pattern
+        const stockLocationFiles = files
+          .filter(f => STOCK_LOCATION_REGEX.test(f.name))
+          .map(f => {
+            const match = f.name.match(STOCK_LOCATION_REGEX);
+            return { name: f.name, date: match ? match[1] : '' };
+          })
+          .filter(f => f.date)
+          .sort((a, b) => {
+            // Sort by date descending, then by filename descending
+            if (a.date !== b.date) return b.date.localeCompare(a.date);
+            return b.name.localeCompare(a.name);
+          });
+        
+        console.log(`[import-catalog-ftp] Stock location files found: ${stockLocationFiles.map(f => f.name).join(', ')}`);
+        
+        if (stockLocationFiles.length === 0) {
+          await client.close();
+          return new Response(
+            JSON.stringify({ 
+              status: "error", 
+              code: "FILE_NOT_FOUND", 
+              message: "Nessun file stock location (790813_StockFile_YYYYMMDD.txt) trovato sul server FTP" 
+            } as ErrorResponse),
+            { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        
+        selectedFilename = stockLocationFiles[0].name;
+        console.log(`[import-catalog-ftp] Selected stock location file: ${selectedFilename} (date: ${stockLocationFiles[0].date})`);
+        
+        // Download the selected file
+        fileBuffer = await client.downloadFile(selectedFilename);
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        console.error(`[import-catalog-ftp] Stock location download failed: ${errMsg}`);
+        await client.close();
+        return new Response(
+          JSON.stringify({ 
+            status: "error", 
+            code: "FILE_NOT_FOUND", 
+            message: `Errore download stock location: ${errMsg}` 
+          } as ErrorResponse),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      
+      const fileSize = fileBuffer.length;
+      console.log(`[import-catalog-ftp] Stock location file downloaded: ${fileSize} bytes`);
+      
+      // Close FTP
+      await client.close();
+      client = null;
+      
+      // Upload to Storage - always save to latest.txt
+      const latestPath = 'stock-location/latest.txt';
+      console.log(`[import-catalog-ftp] Uploading stock location to: ${latestPath}`);
+      
+      const { error: latestError } = await supabase.storage
+        .from(BUCKET_NAME)
+        .upload(latestPath, fileBuffer, { contentType: "text/plain", upsert: true });
+      
+      if (latestError) {
+        console.error(`[import-catalog-ftp] Storage upload error (latest):`, latestError.message);
+      }
+      
+      // If run_id provided, also save to per-run path
+      if (runId) {
+        const runPath = `stock-location/runs/${runId}.txt`;
+        console.log(`[import-catalog-ftp] Uploading stock location to per-run path: ${runPath}`);
+        
+        const { error: runError } = await supabase.storage
+          .from(BUCKET_NAME)
+          .upload(runPath, fileBuffer, { contentType: "text/plain", upsert: true });
+        
+        if (runError) {
+          console.error(`[import-catalog-ftp] Storage upload error (per-run):`, runError.message);
+        }
+      }
+      
+      // Clear buffer
+      fileBuffer = new Uint8Array(0);
+      
+      const fileResult = {
+        filename: selectedFilename,
+        path: latestPath,
+        size: fileSize,
+      };
+      
+      const response = {
+        status: "ok" as const,
+        files: {
+          stockLocationFile: fileResult,
+        },
+        selectedFile: selectedFilename,
+      };
+      
+      console.log(`[import-catalog-ftp] Stock location file processed successfully`);
+      
+      return new Response(
+        JSON.stringify(response),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Standard file handling (material, stock, price)
+    const config = FILE_CONFIG[fileType as 'material' | 'stock' | 'price'];
+    
     // Download the requested file
     let fileBuffer: Uint8Array;
     try {
