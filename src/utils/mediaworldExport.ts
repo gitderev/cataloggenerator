@@ -1,4 +1,11 @@
 import * as XLSX from 'xlsx';
+import { 
+  resolveMarketplaceStock, 
+  getStockForMatnr, 
+  checkSplitMismatch,
+  type StockLocationIndex,
+  type StockLocationWarnings
+} from './stockLocation';
 
 /**
  * Mediaworld Export Utility
@@ -10,6 +17,8 @@ import * as XLSX from 'xlsx';
  * 
  * Ogni modifica alla logica di pricing nel Catalog Generator
  * si riflette automaticamente anche nell'export Mediaworld.
+ * 
+ * IT/EU Stock Split: Uses resolveMarketplaceStock for quantity and lead time.
  */
 
 // =====================================================================
@@ -87,11 +96,12 @@ interface MediaworldExportParams {
     shippingCost: number;
   };
   prepDays: number;
-  // IT/EU stock config (optional for backward compatibility)
-  stockLocationIndex?: Record<string, { stockIT: number; stockEU: number }> | null;
-  includeEu?: boolean;
-  itDays?: number;
-  euDays?: number;
+  // IT/EU stock config
+  stockLocationIndex?: StockLocationIndex | null;
+  stockLocationWarnings?: StockLocationWarnings;
+  includeEu: boolean;
+  itDays: number;
+  euDays: number;
 }
 
 interface ValidationError {
@@ -292,7 +302,12 @@ function parsePrice(value: unknown): number | null {
 export async function exportMediaworldCatalog({
   processedData,
   feeConfig,
-  prepDays
+  prepDays,
+  stockLocationIndex,
+  stockLocationWarnings,
+  includeEu,
+  itDays,
+  euDays
 }: MediaworldExportParams): Promise<{ 
   success: boolean; 
   error?: string; 
@@ -333,7 +348,8 @@ export async function exportMediaworldCatalog({
     processedData.forEach((record, index) => {
       const sku = record.ManufPartNr || '';
       const ean = record.EAN || '';
-      const existingStock = record.ExistingStock;
+      const matnr = record.Matnr || '';
+      const existingStock = Number(record.ExistingStock) || 0;
       
       // === FILTER 1: Skip products without valid EAN ===
       if (!ean || ean.trim() === '' || ean.length < 12) {
@@ -347,14 +363,43 @@ export async function exportMediaworldCatalog({
         return;
       }
       
-      // === FILTER 2: Skip products with stock <= 0 ===
-      const stockValue = Number(existingStock);
-      if (!Number.isFinite(stockValue) || stockValue <= 0) {
+      // === IT/EU STOCK LOGIC ===
+      // Get IT/EU stock from location index (with fallback to existingStock)
+      const warnings = stockLocationWarnings || { 
+        missing_location_file: 0, invalid_location_parse: 0, missing_location_data: 0,
+        split_mismatch: 0, multi_mpn_per_matnr: 0, orphan_4255: 0, 
+        decode_fallback_used: 0, invalid_stock_value: 0 
+      };
+      
+      const { stockIT, stockEU } = getStockForMatnr(
+        stockLocationIndex || null,
+        matnr,
+        existingStock,
+        warnings,
+        true // useFallback
+      );
+      
+      // Check split mismatch if location file is loaded
+      if (stockLocationIndex) {
+        checkSplitMismatch(stockIT, stockEU, existingStock, warnings);
+      }
+      
+      // Use resolveMarketplaceStock for quantity and lead time
+      const stockResult = resolveMarketplaceStock(
+        stockIT,
+        stockEU,
+        includeEu,
+        itDays,
+        euDays
+      );
+      
+      // === FILTER 2: Skip products that don't meet threshold (min 2) ===
+      if (!stockResult.shouldExport) {
         validationErrors.push({
           row: index + 1,
           sku,
           field: 'Quantità',
-          reason: `ExistingStock assente o <= 0: ${existingStock}`
+          reason: `Stock insufficiente: IT=${stockIT}, EU=${stockEU}, includeEU=${includeEu}`
         });
         skippedCount++;
         return;
@@ -414,7 +459,7 @@ export async function exportMediaworldCatalog({
           'ListPrice con Fee RAW type': typeof listPriceConFeeRaw,
           'valore in Prezzo offerta': listPriceConFee,
           'ExistingStock RAW': existingStock,
-          'quantità esportata': stockValue
+          'quantità esportata': stockResult.exportQty
         });
         
         // ALERT se mismatch
@@ -455,6 +500,19 @@ export async function exportMediaworldCatalog({
       // Nota: Il limite superiore di 100000€ è stato rimosso.
       // Il controllo prezzoFinale <= 0 è già coperto sopra (linee 394-403).
       
+      // Log IT/EU stock calculation for first 10 records
+      if (index < 10) {
+        console.log(`%c[Mediaworld:export:IT_EU:row${index}]`, 'color: #00BCD4;', {
+          EAN: ean,
+          SKU: sku,
+          stockIT, stockEU,
+          includeEU: includeEu,
+          exportQty: stockResult.exportQty,
+          leadDays: stockResult.leadDays,
+          source: stockResult.source
+        });
+      }
+      
       // Build row according to Mediaworld template mapping
       // All 22 columns in exact order, empty strings for unused fields
       const row: (string | number)[] = [
@@ -465,7 +523,7 @@ export async function exportMediaworldCatalog({
         '',                                          // Col 5: Descrizione interna offerta → vuoto
         listPriceConFee,                             // Col 6: Prezzo dell'offerta → ListPrice con Fee (NUMBER)
         '',                                          // Col 7: Info aggiuntive prezzo offerta → vuoto
-        stockValue,                                  // Col 8: Quantità dell'offerta → ExistingStock ESATTO
+        stockResult.exportQty,                       // Col 8: Quantità dell'offerta → IT/EU resolved qty
         '',                                          // Col 9: Avviso quantità minima → vuoto
         'Nuovo',                                     // Col 10: Stato dell'offerta → "Nuovo" (fixed)
         '',                                          // Col 11: Data di inizio disponibilità → vuoto
@@ -474,7 +532,7 @@ export async function exportMediaworldCatalog({
         prezzoFinale,                                // Col 14: Prezzo scontato → Prezzo Finale ESATTO (NUMBER)
         '',                                          // Col 15: Data di inizio dello sconto → vuoto
         '',                                          // Col 16: Data di termine dello sconto → vuoto
-        prepDays,                                    // Col 17: Tempo preparazione spedizione (INTEGER)
+        stockResult.leadDays,                        // Col 17: Tempo preparazione spedizione → IT/EU resolved lead days
         '',                                          // Col 18: Aggiorna/Cancella → vuoto
         'recommended-retail-price',                  // Col 19: Tipo prezzo barrato → fixed
         '',                                          // Col 20: Obbligo di ritiro RAEE → vuoto

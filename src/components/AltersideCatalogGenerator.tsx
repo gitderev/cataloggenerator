@@ -2551,12 +2551,33 @@ const AltersideCatalogGenerator: React.FC = () => {
           });
         }
         
+        // Get StockIT/StockEU from location index for EAN catalog
+        const matnr = record.Matnr || '';
+        const existingStock = Number(record.ExistingStock) || 0;
+        const locationStock = getStockForMatnr(
+          stockLocationIndex,
+          matnr,
+          existingStock,
+          stockLocationWarnings,
+          true // useFallback: StockIT=0, StockEU=0 if not in file
+        );
+        // If no location file loaded, fallback compatibility: StockIT=ExistingStock, StockEU=0
+        const stockIT = stockLocationIndex ? locationStock.stockIT : existingStock;
+        const stockEU = stockLocationIndex ? locationStock.stockEU : 0;
+        
+        // Check split mismatch for warning
+        if (stockLocationIndex) {
+          checkSplitMismatch(stockIT, stockEU, existingStock, stockLocationWarnings);
+        }
+        
         return {
           Matnr: record.Matnr,
           ManufPartNr: record.ManufPartNr,
           EAN: record.EAN,
           ShortDescription: record.ShortDescription,
           ExistingStock: record.ExistingStock,
+          StockIT: stockIT,    // NEW: Stock IT from location file
+          StockEU: stockEU,    // NEW: Stock EU from location file
           CustBestPrice: record.CustBestPrice,
           Surcharge: record.Surcharge, // Informational field only (in euros)
           'Costo di Spedizione': formatCents(shipC),
@@ -3684,7 +3705,12 @@ const AltersideCatalogGenerator: React.FC = () => {
       const result = await exportMediaworldCatalog({
         processedData: eanCatalogDataset,
         feeConfig,
-        prepDays: prepDaysMediaworld
+        prepDays: extendedFeeConfig.mediaworldItPreparationDays,
+        stockLocationIndex,
+        stockLocationWarnings,
+        includeEu: extendedFeeConfig.mediaworldIncludeEu,
+        itDays: extendedFeeConfig.mediaworldItPreparationDays,
+        euDays: extendedFeeConfig.mediaworldEuPreparationDays
       });
       
       // === LOG STANDARDIZZATO: RIEPILOGO EXPORT MEDIAWORLD ===
