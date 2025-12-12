@@ -114,17 +114,36 @@ export const ServerSyncPanel: React.FC<ServerSyncPanelProps> = ({
             <div className="flex items-center gap-2 text-rose-800 dark:text-rose-300 mb-2">
               <XCircle className="h-5 w-5" />
               <span className="font-semibold">Pipeline fallita</span>
+              {state.currentStep && (
+                <span className="text-xs font-mono bg-rose-100 dark:bg-rose-900 px-2 py-0.5 rounded">
+                  step: {state.currentStep}
+                </span>
+              )}
             </div>
-            {state.errorMessage && (
+            {/* Show step-specific error if available */}
+            {state.steps[state.currentStep]?.error ? (
+              <div className="space-y-2">
+                <p className="text-sm text-rose-700 dark:text-rose-400 break-words font-medium">
+                  Errore in {state.currentStep}:
+                </p>
+                <pre className="text-xs text-rose-600 dark:text-rose-400 bg-rose-100 dark:bg-rose-900/50 p-2 rounded overflow-x-auto whitespace-pre-wrap break-all">
+                  {state.steps[state.currentStep].error}
+                </pre>
+              </div>
+            ) : state.errorMessage ? (
               <p className="text-sm text-rose-700 dark:text-rose-400 break-words">
                 {state.errorMessage}
+              </p>
+            ) : (
+              <p className="text-sm text-rose-700 dark:text-rose-400">
+                Errore sconosciuto. Controlla i log del server.
               </p>
             )}
             <Button
               variant="outline"
               size="sm"
               onClick={reset}
-              className="mt-2 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100"
+              className="mt-3 border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100"
             >
               Riprova
             </Button>

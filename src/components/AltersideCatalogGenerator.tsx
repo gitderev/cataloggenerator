@@ -5943,38 +5943,16 @@ const AltersideCatalogGenerator: React.FC = () => {
         {/* Download Buttons */}
         {isCompleted && currentProcessedData.length > 0 && (
           <div className="text-center">
-            <h3 className="text-2xl font-bold mb-6">Download Pipeline {currentPipeline}</h3>
-            <div className="flex flex-wrap justify-center gap-4">
-              <button 
-                type="button"
-                onClick={currentPipeline === 'EAN' ? onExportEAN : () => downloadExcel('manufpartnr')} 
-                disabled={(isExportingEAN && currentPipeline === 'EAN') || pipelineRunning}
-                className={`btn btn-primary text-lg px-8 py-3 ${(isExportingEAN && currentPipeline === 'EAN') || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
-              >
-                <Download className="mr-3 h-5 w-5" />
-                {isExportingEAN && currentPipeline === 'EAN' ? 'ESPORTAZIONE...' : `SCARICA EXCEL (${currentPipeline})`}
-              </button>
-              <button 
-                onClick={() => downloadLog(currentPipeline === 'EAN' ? 'ean' : 'manufpartnr')} 
-                className="btn btn-secondary text-lg px-8 py-3"
-              >
-                <Download className="mr-3 h-5 w-5" />
-                SCARICA LOG ({currentPipeline})
-              </button>
-              {discardedRows.length > 0 && currentPipeline === 'EAN' && (
-                <button 
-                  onClick={downloadDiscardedRows}
-                  className="btn btn-secondary text-lg px-8 py-3"
-                >
-                  <Download className="mr-3 h-5 w-5" />
-                  SCARTI EAN ({discardedRows.length})
-                </button>
-              )}
-            </div>
+            <h3 className="text-2xl font-bold mb-6">
+              {currentPipeline === 'EAN' ? 'Export Server-Side' : `Download Pipeline ${currentPipeline}`}
+            </h3>
             
-            {/* Server-Side Pipeline Panel - PRIMARY method for generating exports */}
+            {/* For EAN pipeline: ONLY show ServerSyncPanel - NO client-side export */}
             {currentPipeline === 'EAN' && (
-              <div className="mt-8">
+              <div className="mb-6">
+                <p className="text-sm text-muted-foreground mb-4">
+                  Tutti gli export EAN sono generati esclusivamente server-side per garantire coerenza con i file caricati su SFTP.
+                </p>
                 <ServerSyncPanel
                   disabled={pipelineRunning || isProcessing}
                   onSyncStarted={() => setPipelineRunning(true)}
@@ -5983,12 +5961,27 @@ const AltersideCatalogGenerator: React.FC = () => {
               </div>
             )}
             
-            {/* Note: IT/EU Stock Config moved to file upload section for always-visible access */}
-            
-            {/* Note: Local preview exports REMOVED - all exports are server-side only */}
-            {/* This ensures UI downloads and SFTP uploads use identical files */}
-
-            {/* Note: SFTP upload status now handled by ServerSyncPanel above */}
+            {/* For MPN pipeline: keep client-side download */}
+            {currentPipeline === 'MPN' && (
+              <div className="flex flex-wrap justify-center gap-4">
+                <button 
+                  type="button"
+                  onClick={() => downloadExcel('manufpartnr')} 
+                  disabled={pipelineRunning}
+                  className={`btn btn-primary text-lg px-8 py-3 ${pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <Download className="mr-3 h-5 w-5" />
+                  SCARICA EXCEL (MPN)
+                </button>
+                <button 
+                  onClick={() => downloadLog('manufpartnr')} 
+                  className="btn btn-secondary text-lg px-8 py-3"
+                >
+                  <Download className="mr-3 h-5 w-5" />
+                  SCARICA LOG (MPN)
+                </button>
+              </div>
+            )}
           </div>
         )}
 

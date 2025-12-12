@@ -427,8 +427,9 @@ interface MaterialMeta {
 
 async function saveStockIndex(supabase: any, stockIndex: Record<string, number>): Promise<{ success: boolean; error?: string }> {
   const json = JSON.stringify(stockIndex);
-  console.log(`[parse_merge:indices] Saving stock index: ${Object.keys(stockIndex).length} entries, ${json.length} bytes`);
-  return await uploadToStorage(supabase, 'exports', STOCK_INDEX_FILE, json, 'application/json');
+  const bytes = new TextEncoder().encode(json);
+  console.log(`[parse_merge:indices] Saving stock index: ${Object.keys(stockIndex).length} entries, ${bytes.length} bytes, contentType=application/octet-stream`);
+  return await uploadToStorage(supabase, 'exports', STOCK_INDEX_FILE, bytes, 'application/octet-stream');
 }
 
 async function loadStockIndex(supabase: any): Promise<{ index: Record<string, number> | null; error?: string }> {
@@ -445,8 +446,9 @@ async function loadStockIndex(supabase: any): Promise<{ index: Record<string, nu
 
 async function savePriceIndex(supabase: any, priceIndex: Record<string, [number, number, number]>): Promise<{ success: boolean; error?: string }> {
   const json = JSON.stringify(priceIndex);
-  console.log(`[parse_merge:indices] Saving price index: ${Object.keys(priceIndex).length} entries, ${json.length} bytes`);
-  return await uploadToStorage(supabase, 'exports', PRICE_INDEX_FILE, json, 'application/json');
+  const bytes = new TextEncoder().encode(json);
+  console.log(`[parse_merge:indices] Saving price index: ${Object.keys(priceIndex).length} entries, ${bytes.length} bytes, contentType=application/octet-stream`);
+  return await uploadToStorage(supabase, 'exports', PRICE_INDEX_FILE, bytes, 'application/octet-stream');
 }
 
 async function loadPriceIndex(supabase: any): Promise<{ index: Record<string, [number, number, number]> | null; error?: string }> {
@@ -463,8 +465,9 @@ async function loadPriceIndex(supabase: any): Promise<{ index: Record<string, [n
 
 async function saveMaterialMeta(supabase: any, meta: MaterialMeta): Promise<{ success: boolean; error?: string }> {
   const json = JSON.stringify(meta);
-  console.log(`[parse_merge:indices] Saving material meta: headerEndPos=${meta.headerEndPos}, totalBytes=${meta.totalBytes}`);
-  return await uploadToStorage(supabase, 'exports', MATERIAL_META_FILE, json, 'application/json');
+  const bytes = new TextEncoder().encode(json);
+  console.log(`[parse_merge:indices] Saving material meta: headerEndPos=${meta.headerEndPos}, totalBytes=${meta.totalBytes}, contentType=application/octet-stream`);
+  return await uploadToStorage(supabase, 'exports', MATERIAL_META_FILE, bytes, 'application/octet-stream');
 }
 
 async function loadMaterialMeta(supabase: any): Promise<{ meta: MaterialMeta | null; error?: string }> {
