@@ -172,8 +172,8 @@ export const ServerSyncPanel: React.FC<ServerSyncPanelProps> = ({
           </Button>
         </div>
 
-        {/* Download Buttons - Only shown after success or always available */}
-        {(isComplete || state.status === 'idle') && (
+        {/* Download Buttons - Only shown after success */}
+        {isComplete && (
           <div className="border-t pt-4 mt-4">
             <h4 className="text-sm font-medium mb-3 flex items-center gap-2">
               <Download className="h-4 w-4" />
@@ -195,7 +195,7 @@ export const ServerSyncPanel: React.FC<ServerSyncPanelProps> = ({
               ))}
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              I file CSV scaricati sono identici a quelli caricati su SFTP dalla pipeline.
+              I file scaricati sono identici a quelli caricati su SFTP dalla pipeline server-side.
             </p>
           </div>
         )}
