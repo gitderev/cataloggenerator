@@ -55,6 +55,7 @@ import {
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
 import SyncScheduler from '@/components/SyncScheduler';
+import ServerSyncPanel from '@/components/ServerSyncPanel';
 
 // Helper functions for MPN calculations
 function asNum(v: any): number {
@@ -3190,186 +3191,12 @@ const AltersideCatalogGenerator: React.FC = () => {
       
       toast({
         title: "Export EAN completato",
-        description: "Download avviato. Salvataggio su bucket in corso..."
+        description: "Download del Catalogo EAN locale avviato. Per generare gli export Mediaworld/ePrice e caricarli su SFTP, usa la Pipeline Server-Side."
       });
 
-      // =====================================================================
-      // STEP 2: Save all 3 exports to Supabase bucket "exports"
-      // =====================================================================
-      setSftpUploadStatus({ phase: 'saving', message: 'Salvataggio file nel bucket...' });
-      
-      try {
-        // Generate ePrice export
-        console.log('[EAN:sftp] Generating ePrice export...');
-        const ePriceDataset = finalDataset.map((record: any) => {
-          const prezzoFinaleRaw = record['Prezzo Finale'];
-          let price = 0;
-          if (typeof prezzoFinaleRaw === 'string') {
-            price = parseFloat(prezzoFinaleRaw.replace(',', '.'));
-          } else if (typeof prezzoFinaleRaw === 'number') {
-            price = prezzoFinaleRaw;
-          }
-
-          return {
-            'sku': record.ManufPartNr || '',
-            'product-id': record.EAN || '',
-            'product-id-type': 'EAN',
-            'price': price,
-            'quantity': record.ExistingStock || 0,
-            'state': 11,
-            'fulfillment-latency': prepDays,
-            'logistic-class': 'K'
-          };
-        }).filter((r: any) => r['product-id'] && r['product-id'].length >= 12 && r.quantity > 0);
-
-        const ePriceWs = XLSX.utils.json_to_sheet(ePriceDataset);
-        const ePriceWb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(ePriceWb, ePriceWs, "Tracciato_Inserimento_Offerte");
-        const ePriceBuffer = XLSX.write(ePriceWb, { bookType: "xlsx", type: "array" });
-        const ePriceBlob = new Blob([ePriceBuffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-
-        // Generate Mediaworld export
-        console.log('[EAN:sftp] Generating Mediaworld export...');
-        const templateResponse = await fetch('/mediaworld-template.xlsx');
-        if (!templateResponse.ok) {
-          throw new Error('Template Mediaworld non trovato');
-        }
-        const templateBuffer = await templateResponse.arrayBuffer();
-        const templateWb = XLSX.read(templateBuffer, { type: 'array' });
-        const dataSheet = templateWb.Sheets['Data'];
-        
-        if (!dataSheet) {
-          throw new Error('Foglio "Data" non trovato nel template Mediaworld');
-        }
-
-        const mediaworldRows: any[][] = [];
-        finalDataset.forEach((record: any) => {
-          const ean = record.EAN || '';
-          const sku = record.ManufPartNr || '';
-          const stock = Number(record.ExistingStock) || 0;
-          
-          if (!ean || ean.length < 12 || stock <= 0 || !sku) return;
-
-          const prezzoFinaleRaw = record['Prezzo Finale'];
-          const listPriceConFeeRaw = record['ListPrice con Fee'];
-          
-          let prezzoFinale = 0;
-          if (typeof prezzoFinaleRaw === 'string') {
-            prezzoFinale = parseFloat(prezzoFinaleRaw.replace(',', '.'));
-          } else if (typeof prezzoFinaleRaw === 'number') {
-            prezzoFinale = prezzoFinaleRaw;
-          }
-
-          let listPriceConFee = 0;
-          if (typeof listPriceConFeeRaw === 'number') {
-            listPriceConFee = listPriceConFeeRaw;
-          } else if (typeof listPriceConFeeRaw === 'string') {
-            listPriceConFee = parseFloat(listPriceConFeeRaw.replace(',', '.'));
-          }
-
-          if (prezzoFinale <= 0 || listPriceConFee <= 0) return;
-
-          mediaworldRows.push([
-            sku, ean, 'EAN', record.ShortDescription || '', '',
-            listPriceConFee, '', stock, '', 'Nuovo', '', '',
-            'Consegna gratuita', prezzoFinale, '', '',
-            prepDaysMediaworld, '', 'recommended-retail-price', '', '', ''
-          ]);
-        });
-
-        const startRow = 2;
-        mediaworldRows.forEach((row, rowIndex) => {
-          row.forEach((value, colIndex) => {
-            const addr = XLSX.utils.encode_cell({ r: startRow + rowIndex, c: colIndex });
-            dataSheet[addr] = typeof value === 'number' ? { v: value, t: 'n' } : { v: value, t: 's' };
-          });
-        });
-
-        const endRow = startRow + mediaworldRows.length - 1;
-        dataSheet['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: endRow, c: 21 } });
-
-        const mediaworldBuffer = XLSX.write(templateWb, { bookType: "xlsx", type: "array" });
-        const mediaworldBlob = new Blob([mediaworldBuffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-
-        // Upload all 3 files to bucket
-        const filesToUpload = [
-          { name: 'Catalogo EAN.xlsx', blob: blob },
-          { name: 'Export ePrice.xlsx', blob: ePriceBlob },
-          { name: 'Export Mediaworld.xlsx', blob: mediaworldBlob }
-        ];
-
-        for (const file of filesToUpload) {
-          const { error } = await supabase.storage.from('exports').upload(file.name, file.blob, { upsert: true });
-          if (error) {
-            console.error(`[EAN:sftp] Error saving ${file.name}:`, error);
-            throw new Error(`Errore salvataggio ${file.name}: ${error.message}`);
-          }
-          console.log(`[EAN:sftp] Saved ${file.name} to bucket`);
-        }
-
-        // =====================================================================
-        // STEP 3: Call edge function to upload to SFTP
-        // =====================================================================
-        setSftpUploadStatus({ phase: 'uploading', message: 'Upload SFTP in corso...' });
-        console.log('[EAN:sftp] Calling upload-exports-to-sftp edge function...');
-
-        const { data: sftpResult, error: sftpError } = await supabase.functions.invoke('upload-exports-to-sftp', {
-          body: {
-            files: [
-              { bucket: 'exports', path: 'Catalogo EAN.xlsx', filename: 'Catalogo EAN.xlsx' },
-              { bucket: 'exports', path: 'Export ePrice.xlsx', filename: 'Export ePrice.xlsx' },
-              { bucket: 'exports', path: 'Export Mediaworld.xlsx', filename: 'Export Mediaworld.xlsx' }
-            ]
-          }
-        });
-
-        if (sftpError) {
-          console.error('[EAN:sftp] Edge function error:', sftpError);
-          setSftpUploadStatus({ 
-            phase: 'error', 
-            message: `File salvati nel bucket. Errore SFTP: ${sftpError.message}`,
-            results: filesToUpload.map(f => ({ filename: f.name, uploaded: false, error: sftpError.message }))
-          });
-          toast({
-            title: "File salvati nel bucket",
-            description: `Upload SFTP fallito: ${sftpError.message}`,
-            variant: "destructive"
-          });
-        } else if (sftpResult?.status === 'ok') {
-          setSftpUploadStatus({ 
-            phase: 'complete', 
-            message: 'Upload SFTP completato con successo!',
-            results: sftpResult.results
-          });
-          toast({
-            title: "Export completato",
-            description: "File salvati nel bucket e caricati su SFTP"
-          });
-        } else {
-          setSftpUploadStatus({ 
-            phase: 'error', 
-            message: sftpResult?.message || 'File salvati nel bucket. Upload SFTP non riuscito.',
-            results: sftpResult?.results
-          });
-          toast({
-            title: "File salvati nel bucket",
-            description: sftpResult?.message || "Upload SFTP non riuscito",
-            variant: "destructive"
-          });
-        }
-
-      } catch (sftpErr: any) {
-        console.error('[EAN:sftp] Error:', sftpErr);
-        setSftpUploadStatus({ 
-          phase: 'error', 
-          message: sftpErr.message || 'Errore durante salvataggio/upload'
-        });
-        // Don't show destructive toast - local download succeeded
-        toast({
-          title: "Download locale completato",
-          description: `Errore bucket/SFTP: ${sftpErr.message}`
-        });
-      }
+      // NOTE: Client-side XLSX generation for ePrice/Mediaworld REMOVED.
+      // All exports are now generated server-side via run-full-sync pipeline.
+      // This ensures consistency between downloaded files and SFTP uploads.
       
     } catch (error) {
       const exportEndTime = performance.now();
@@ -6145,99 +5972,58 @@ const AltersideCatalogGenerator: React.FC = () => {
               )}
             </div>
             
+            {/* Server-Side Pipeline Panel - PRIMARY method for generating exports */}
+            {currentPipeline === 'EAN' && (
+              <div className="mt-8">
+                <ServerSyncPanel
+                  disabled={pipelineRunning || isProcessing}
+                  onSyncStarted={() => setPipelineRunning(true)}
+                  onSyncComplete={() => setPipelineRunning(false)}
+                />
+              </div>
+            )}
+            
             {/* Note: IT/EU Stock Config moved to file upload section for always-visible access */}
             
-            {/* ePrice Export Section - Only for EAN pipeline */}
+            {/* Local Preview Export Sections - for manual preview, NOT for SFTP */}
             {currentPipeline === 'EAN' && (
-              <div className="mt-8 p-6 rounded-lg border" style={{ background: '#f0f9ff' }}>
-                <h4 className="text-lg font-semibold mb-4 text-blue-800">Esporta Catalogo ePrice</h4>
-                <div className="flex flex-wrap items-center justify-center gap-4">
+              <div className="mt-8 p-4 rounded-lg border border-amber-200 bg-amber-50">
+                <h4 className="text-sm font-semibold mb-2 text-amber-800 flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4" />
+                  Export locale (solo anteprima)
+                </h4>
+                <p className="text-xs text-amber-700 mb-4">
+                  Questi export locali sono solo per anteprima. Per generare i file corretti con split IT/EU e caricarli su SFTP, 
+                  usa la "Pipeline Server-Side" qui sopra.
+                </p>
+                
+                <div className="flex flex-wrap gap-4">
+                  {/* ePrice Local Preview */}
                   <button 
                     type="button"
                     onClick={onExportEprice}
                     disabled={isExportingEprice || pipelineRunning}
-                    className={`btn btn-primary text-lg px-8 py-3 ${isExportingEprice || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    style={{ background: '#0369a1' }}
+                    className={`btn btn-secondary text-sm px-4 py-2 ${isExportingEprice || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
-                    <Download className="mr-3 h-5 w-5" />
-                    {isExportingEprice ? 'ESPORTAZIONE...' : 'Esporta catalogo ePrice'}
+                    <Download className="mr-2 h-4 w-4" />
+                    {isExportingEprice ? 'Esportazione...' : 'Anteprima ePrice (locale)'}
                   </button>
-                </div>
-                <p className="text-xs text-muted-foreground mt-3">
-                  Usa configurazione IT/EU sopra. Genera "Tracciato_Pubblicazione_Offerte_new.xlsx"
-                </p>
-              </div>
-            )}
-            
-            {/* Mediaworld Export Section - Only for EAN pipeline */}
-            {currentPipeline === 'EAN' && (
-              <div className="mt-8 p-6 rounded-lg border" style={{ background: '#fef3c7' }}>
-                <h4 className="text-lg font-semibold mb-4 text-amber-800">Esporta Catalogo Mediaworld</h4>
-                <div className="flex flex-wrap items-center justify-center gap-4">
+                  
+                  {/* Mediaworld Local Preview */}
                   <button 
                     type="button"
                     onClick={onExportMediaworld}
                     disabled={isExportingMediaworld || pipelineRunning}
-                    className={`btn btn-primary text-lg px-8 py-3 ${isExportingMediaworld || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    style={{ background: '#d97706' }}
+                    className={`btn btn-secondary text-sm px-4 py-2 ${isExportingMediaworld || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
-                    <Download className="mr-3 h-5 w-5" />
-                    {isExportingMediaworld ? 'ESPORTAZIONE...' : 'Genera catalogo Mediaworld (.xlsx)'}
+                    <Download className="mr-2 h-4 w-4" />
+                    {isExportingMediaworld ? 'Esportazione...' : 'Anteprima Mediaworld (locale)'}
                   </button>
                 </div>
-                <p className="text-xs text-muted-foreground mt-3">
-                  Usa configurazione IT/EU sopra. Genera "mediaworld-offers-YYYYMMDD.xlsx"
-                </p>
               </div>
             )}
 
-            {/* Note: Save button moved to IT/EU config section in file upload area */}
-            {/* SFTP Upload Status - Only for EAN pipeline */}
-            {currentPipeline === 'EAN' && sftpUploadStatus.phase !== 'idle' && (
-              <div className="mt-8 p-6 rounded-lg border-2" style={{ 
-                background: sftpUploadStatus.phase === 'complete' ? '#f0fdf4' : 
-                            sftpUploadStatus.phase === 'error' ? '#fef2f2' : '#f0f9ff', 
-                borderColor: sftpUploadStatus.phase === 'complete' ? '#22c55e' : 
-                             sftpUploadStatus.phase === 'error' ? '#ef4444' : '#3b82f6'
-              }}>
-                <h4 className={`text-lg font-semibold mb-4 flex items-center gap-2 ${
-                  sftpUploadStatus.phase === 'complete' ? 'text-green-800' :
-                  sftpUploadStatus.phase === 'error' ? 'text-red-800' : 'text-blue-800'
-                }`}>
-                  {sftpUploadStatus.phase === 'complete' && <CheckCircle className="h-5 w-5" />}
-                  {sftpUploadStatus.phase === 'error' && <XCircle className="h-5 w-5" />}
-                  {['saving', 'uploading'].includes(sftpUploadStatus.phase) && <Loader2 className="h-5 w-5 animate-spin" />}
-                  <Cloud className="h-5 w-5" />
-                  Stato Upload Bucket/SFTP
-                </h4>
-                
-                <div className="flex items-center gap-2 mb-2">
-                  <span className={`font-medium ${
-                    sftpUploadStatus.phase === 'complete' ? 'text-green-700' :
-                    sftpUploadStatus.phase === 'error' ? 'text-red-700' :
-                    'text-blue-700'
-                  }`}>
-                    {sftpUploadStatus.message}
-                  </span>
-                </div>
-                
-                {sftpUploadStatus.results && (
-                  <div className="mt-2 space-y-1">
-                    {sftpUploadStatus.results.map((result, idx) => (
-                      <div key={idx} className="flex items-center gap-2 text-sm">
-                        {result.uploaded ? (
-                          <CheckCircle className="h-4 w-4 text-green-600" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-red-600" />
-                        )}
-                        <span>{result.filename}</span>
-                        {result.error && <span className="text-red-600 text-xs">({result.error})</span>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+            {/* Note: SFTP upload status now handled by ServerSyncPanel above */}
           </div>
         )}
 

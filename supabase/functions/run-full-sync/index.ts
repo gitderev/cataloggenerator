@@ -187,11 +187,11 @@ serve(async (req) => {
       shippingCost: feeData?.shipping_cost ?? 6.00,
       mediaworldPrepDays: feeData?.mediaworld_preparation_days ?? 3,
       epricePrepDays: feeData?.eprice_preparation_days ?? 1,
-      // IT/EU stock config
-      mediaworldIncludeEu: feeData?.mediaworld_include_eu ?? false,
+      // IT/EU stock config - DEFAULT TO TRUE for backward compatibility (nullish coalescing)
+      mediaworldIncludeEu: feeData?.mediaworld_include_eu == null ? true : feeData.mediaworld_include_eu,
       mediaworldItPrepDays: feeData?.mediaworld_it_preparation_days ?? 3,
       mediaworldEuPrepDays: feeData?.mediaworld_eu_preparation_days ?? 5,
-      epriceIncludeEu: feeData?.eprice_include_eu ?? false,
+      epriceIncludeEu: feeData?.eprice_include_eu == null ? true : feeData.eprice_include_eu,
       epriceItPrepDays: feeData?.eprice_it_preparation_days ?? 1,
       epriceEuPrepDays: feeData?.eprice_eu_preparation_days ?? 3
     };
