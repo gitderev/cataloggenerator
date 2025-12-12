@@ -11,6 +11,12 @@ export interface SyncStep {
   duration_ms?: number;
 }
 
+export interface ExportFiles {
+  ean?: string;
+  eprice?: string;
+  mediaworld?: string;
+}
+
 export interface SyncRunState {
   runId: string | null;
   status: SyncStatus;
@@ -21,6 +27,7 @@ export interface SyncRunState {
   locationWarnings: Record<string, number>;
   startedAt: Date | null;
   finishedAt: Date | null;
+  exportFiles: ExportFiles;
 }
 
 const INITIAL_STATE: SyncRunState = {
@@ -33,11 +40,12 @@ const INITIAL_STATE: SyncRunState = {
   locationWarnings: {},
   startedAt: null,
   finishedAt: null,
+  exportFiles: {},
 };
 
 const POLL_INTERVAL_MS = 2000;
 
-// Server-generated export files (CSV)
+// Server-generated export files - paths retrieved from sync_runs.steps.exports.files
 export const EXPORT_FILES = {
   ean: { path: 'Catalogo EAN.csv', displayName: 'Catalogo EAN' },
   eprice: { path: 'Export ePrice.csv', displayName: 'Export ePrice' },
@@ -75,6 +83,9 @@ export function useSyncProgress() {
 
       const steps = (data.steps || {}) as Record<string, any>;
       const currentStep = steps.current_step || '';
+      
+      // Extract export file paths from steps.exports.files
+      const exportFiles: ExportFiles = steps.exports?.files || {};
 
       setState(prev => ({
         ...prev,
@@ -85,6 +96,7 @@ export function useSyncProgress() {
         runtimeMs: data.runtime_ms,
         locationWarnings: (data.location_warnings || {}) as Record<string, number>,
         finishedAt: data.finished_at ? new Date(data.finished_at) : null,
+        exportFiles,
       }));
 
       // Stop polling when run is complete
@@ -244,19 +256,26 @@ export function useSyncProgress() {
     }
   }, [state.status, pollStatus]);
 
-  // Download server-generated export file
+  // Download server-generated export file using paths from sync_runs.steps.exports.files
   const downloadExport = useCallback(async (fileKey: keyof typeof EXPORT_FILES): Promise<void> => {
     const fileInfo = EXPORT_FILES[fileKey];
     
+    // Use path from sync_runs.steps.exports.files if available, otherwise fallback to default
+    const exportFilePath = state.exportFiles[fileKey];
+    // Remove 'exports/' prefix if present since we're downloading from 'exports' bucket
+    const downloadPath = exportFilePath 
+      ? exportFilePath.replace(/^exports\//, '')
+      : fileInfo.path;
+    
     try {
-      console.log(`[useSyncProgress] Downloading ${fileInfo.path}...`);
+      console.log(`[useSyncProgress] Downloading ${downloadPath} from exports bucket...`);
       
       const { data, error } = await supabase.storage
         .from('exports')
-        .download(fileInfo.path);
+        .download(downloadPath);
 
       if (error || !data) {
-        console.error(`[useSyncProgress] Download error for ${fileInfo.path}:`, error);
+        console.error(`[useSyncProgress] Download error for ${downloadPath}:`, error);
         toast({
           title: 'Errore download',
           description: `Impossibile scaricare ${fileInfo.displayName}: ${error?.message || 'File non trovato'}`,
@@ -269,7 +288,7 @@ export function useSyncProgress() {
       const url = URL.createObjectURL(data);
       const a = document.createElement('a');
       a.href = url;
-      a.download = fileInfo.path;
+      a.download = downloadPath;
       a.rel = 'noopener';
       a.style.display = 'none';
       document.body.appendChild(a);
@@ -290,7 +309,7 @@ export function useSyncProgress() {
         variant: 'destructive',
       });
     }
-  }, []);
+  }, [state.exportFiles]);
 
   // Reset state
   const reset = useCallback(() => {

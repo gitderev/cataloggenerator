@@ -5985,43 +5985,8 @@ const AltersideCatalogGenerator: React.FC = () => {
             
             {/* Note: IT/EU Stock Config moved to file upload section for always-visible access */}
             
-            {/* Local Preview Export Sections - for manual preview, NOT for SFTP */}
-            {currentPipeline === 'EAN' && (
-              <div className="mt-8 p-4 rounded-lg border border-amber-200 bg-amber-50">
-                <h4 className="text-sm font-semibold mb-2 text-amber-800 flex items-center gap-2">
-                  <AlertCircle className="h-4 w-4" />
-                  Export locale (solo anteprima)
-                </h4>
-                <p className="text-xs text-amber-700 mb-4">
-                  Questi export locali sono solo per anteprima. Per generare i file corretti con split IT/EU e caricarli su SFTP, 
-                  usa la "Pipeline Server-Side" qui sopra.
-                </p>
-                
-                <div className="flex flex-wrap gap-4">
-                  {/* ePrice Local Preview */}
-                  <button 
-                    type="button"
-                    onClick={onExportEprice}
-                    disabled={isExportingEprice || pipelineRunning}
-                    className={`btn btn-secondary text-sm px-4 py-2 ${isExportingEprice || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    <Download className="mr-2 h-4 w-4" />
-                    {isExportingEprice ? 'Esportazione...' : 'Anteprima ePrice (locale)'}
-                  </button>
-                  
-                  {/* Mediaworld Local Preview */}
-                  <button 
-                    type="button"
-                    onClick={onExportMediaworld}
-                    disabled={isExportingMediaworld || pipelineRunning}
-                    className={`btn btn-secondary text-sm px-4 py-2 ${isExportingMediaworld || pipelineRunning ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    <Download className="mr-2 h-4 w-4" />
-                    {isExportingMediaworld ? 'Esportazione...' : 'Anteprima Mediaworld (locale)'}
-                  </button>
-                </div>
-              </div>
-            )}
+            {/* Note: Local preview exports REMOVED - all exports are server-side only */}
+            {/* This ensures UI downloads and SFTP uploads use identical files */}
 
             {/* Note: SFTP upload status now handled by ServerSyncPanel above */}
           </div>

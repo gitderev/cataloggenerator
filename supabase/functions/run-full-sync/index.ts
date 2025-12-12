@@ -180,27 +180,107 @@ serve(async (req) => {
       }
     }
 
-    const { data: feeData } = await supabase.from('fee_config').select('*').limit(1).single();
+    // ========== FAIL-FAST VALIDATION: fee_config fields ==========
+    const { data: feeData, error: feeError } = await supabase.from('fee_config').select('*').limit(1).single();
+    
+    if (feeError || !feeData) {
+      console.error('[orchestrator] FAIL-FAST: fee_config not found or error:', feeError);
+      return new Response(JSON.stringify({ 
+        status: 'error', 
+        message: 'Configurazione fee_config mancante. Impossibile procedere.' 
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    
+    // FAIL-FAST: Validate required IT/EU fields for Mediaworld
+    const mediaworldValidation = {
+      includeEu: feeData.mediaworld_include_eu,
+      itDays: feeData.mediaworld_it_preparation_days,
+      euDays: feeData.mediaworld_eu_preparation_days
+    };
+    
+    if (typeof mediaworldValidation.includeEu !== 'boolean') {
+      console.error('[orchestrator] FAIL-FAST: mediaworld_include_eu non definito o non boolean');
+      return new Response(JSON.stringify({ 
+        status: 'error', 
+        message: 'FAIL-FAST: mediaworld_include_eu deve essere definito (true/false) in fee_config.' 
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    
+    if (typeof mediaworldValidation.itDays !== 'number' || !Number.isFinite(mediaworldValidation.itDays)) {
+      console.error('[orchestrator] FAIL-FAST: mediaworld_it_preparation_days non definito o non numerico');
+      return new Response(JSON.stringify({ 
+        status: 'error', 
+        message: 'FAIL-FAST: mediaworld_it_preparation_days deve essere un numero in fee_config.' 
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    
+    if (typeof mediaworldValidation.euDays !== 'number' || !Number.isFinite(mediaworldValidation.euDays)) {
+      console.error('[orchestrator] FAIL-FAST: mediaworld_eu_preparation_days non definito o non numerico');
+      return new Response(JSON.stringify({ 
+        status: 'error', 
+        message: 'FAIL-FAST: mediaworld_eu_preparation_days deve essere un numero in fee_config.' 
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    
+    // FAIL-FAST: Validate required IT/EU fields for ePrice
+    const epriceValidation = {
+      includeEu: feeData.eprice_include_eu,
+      itDays: feeData.eprice_it_preparation_days,
+      euDays: feeData.eprice_eu_preparation_days
+    };
+    
+    if (typeof epriceValidation.includeEu !== 'boolean') {
+      console.error('[orchestrator] FAIL-FAST: eprice_include_eu non definito o non boolean');
+      return new Response(JSON.stringify({ 
+        status: 'error', 
+        message: 'FAIL-FAST: eprice_include_eu deve essere definito (true/false) in fee_config.' 
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    
+    if (typeof epriceValidation.itDays !== 'number' || !Number.isFinite(epriceValidation.itDays)) {
+      console.error('[orchestrator] FAIL-FAST: eprice_it_preparation_days non definito o non numerico');
+      return new Response(JSON.stringify({ 
+        status: 'error', 
+        message: 'FAIL-FAST: eprice_it_preparation_days deve essere un numero in fee_config.' 
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    
+    if (typeof epriceValidation.euDays !== 'number' || !Number.isFinite(epriceValidation.euDays)) {
+      console.error('[orchestrator] FAIL-FAST: eprice_eu_preparation_days non definito o non numerico');
+      return new Response(JSON.stringify({ 
+        status: 'error', 
+        message: 'FAIL-FAST: eprice_eu_preparation_days deve essere un numero in fee_config.' 
+      }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+    
+    console.log('[orchestrator] FAIL-FAST validation passed:', {
+      mediaworld: mediaworldValidation,
+      eprice: epriceValidation
+    });
+    
+    // Build fee config from validated data (NO defaults for IT/EU fields)
     const feeConfig = {
-      feeDrev: feeData?.fee_drev ?? 1.05,
-      feeMkt: feeData?.fee_mkt ?? 1.08,
-      shippingCost: feeData?.shipping_cost ?? 6.00,
-      mediaworldPrepDays: feeData?.mediaworld_preparation_days ?? 3,
-      epricePrepDays: feeData?.eprice_preparation_days ?? 1,
-      // IT/EU stock config - DEFAULT TO TRUE for backward compatibility (nullish coalescing)
-      mediaworldIncludeEu: feeData?.mediaworld_include_eu == null ? true : feeData.mediaworld_include_eu,
-      mediaworldItPrepDays: feeData?.mediaworld_it_preparation_days ?? 3,
-      mediaworldEuPrepDays: feeData?.mediaworld_eu_preparation_days ?? 5,
-      epriceIncludeEu: feeData?.eprice_include_eu == null ? true : feeData.eprice_include_eu,
-      epriceItPrepDays: feeData?.eprice_it_preparation_days ?? 1,
-      epriceEuPrepDays: feeData?.eprice_eu_preparation_days ?? 3
+      feeDrev: feeData.fee_drev ?? 1.05,
+      feeMkt: feeData.fee_mkt ?? 1.08,
+      shippingCost: feeData.shipping_cost ?? 6.00,
+      mediaworldPrepDays: feeData.mediaworld_preparation_days ?? 3,
+      epricePrepDays: feeData.eprice_preparation_days ?? 1,
+      // IT/EU stock config - NO DEFAULTS (fail-fast validated above)
+      mediaworldIncludeEu: feeData.mediaworld_include_eu,
+      mediaworldItPrepDays: feeData.mediaworld_it_preparation_days,
+      mediaworldEuPrepDays: feeData.mediaworld_eu_preparation_days,
+      epriceIncludeEu: feeData.eprice_include_eu,
+      epriceItPrepDays: feeData.eprice_it_preparation_days,
+      epriceEuPrepDays: feeData.eprice_eu_preparation_days
     };
 
     runId = crypto.randomUUID();
     startTime = Date.now();
     await supabase.from('sync_runs').insert({ 
       id: runId, started_at: new Date().toISOString(), status: 'running', 
-      trigger_type: trigger, attempt: 1, steps: { current_step: 'import_ftp' }, metrics: {},
+      trigger_type: trigger, attempt: 1, 
+      steps: { current_step: 'import_ftp' }, 
+      metrics: {},
       location_warnings: {}
     });
     console.log(`[orchestrator] Run created: ${runId}`);

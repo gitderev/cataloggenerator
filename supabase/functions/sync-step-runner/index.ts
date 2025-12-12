@@ -164,6 +164,31 @@ async function updateLocationWarnings(supabase: any, runId: string, warnings: St
   }
 }
 
+// ========== UPDATE EXPORT FILE PATH IN DB ==========
+// Saves export file paths to sync_runs.steps.exports.files for UI download and SFTP upload
+async function updateExportFilePath(supabase: any, runId: string, exportKey: 'ean' | 'eprice' | 'mediaworld', filePath: string): Promise<void> {
+  try {
+    const { data: run } = await supabase.from('sync_runs').select('steps').eq('id', runId).single();
+    const currentSteps = run?.steps || {};
+    
+    // Initialize exports.files structure if not present
+    if (!currentSteps.exports) {
+      currentSteps.exports = { files: {} };
+    }
+    if (!currentSteps.exports.files) {
+      currentSteps.exports.files = {};
+    }
+    
+    // Set the file path for this export type
+    currentSteps.exports.files[exportKey] = filePath;
+    
+    await supabase.from('sync_runs').update({ steps: currentSteps }).eq('id', runId);
+    console.log(`[sync-step-runner] Saved export file path: ${exportKey} -> ${filePath}`);
+  } catch (e) {
+    console.error(`[sync-step-runner] Failed to update export file path:`, e);
+  }
+}
+
 // ========== COLUMN ALIASES (case-insensitive matching) ==========
 const COLUMN_ALIASES: Record<string, string[]> = {
   'Matnr': ['matnr', 'mat_nr', 'material_nr', 'materialnr', 'material', 'sku', 'product_id', 'productid', 'id'],
@@ -1132,6 +1157,9 @@ async function stepExportEan(supabase: any, runId: string): Promise<{ success: b
       return { success: false, error };
     }
     
+    // Save export file path to sync_runs.steps.exports.files
+    await updateExportFilePath(supabase, runId, 'ean', 'exports/Catalogo EAN.csv');
+    
     await updateStepResult(supabase, runId, 'export_ean', {
       status: 'success', duration_ms: Date.now() - startTime, rows: eanRows.length, skipped: eanSkipped,
       metrics: { ean_export_rows: eanRows.length, ean_export_skipped: eanSkipped }
@@ -1149,9 +1177,18 @@ async function stepExportEan(supabase: any, runId: string): Promise<{ success: b
 
 // ========== STEP: EXPORT_MEDIAWORLD (with IT/EU stock support) ==========
 async function stepExportMediaworld(supabase: any, runId: string, feeConfig: any): Promise<{ success: boolean; error?: string }> {
-  const includeEu = feeConfig?.mediaworldIncludeEu || false;
-  const itDays = feeConfig?.mediaworldItPrepDays || 3;
-  const euDays = feeConfig?.mediaworldEuPrepDays || 5;
+  // FAIL-FAST: No defaults - these must be set by orchestrator after validation
+  const includeEu = feeConfig?.mediaworldIncludeEu;
+  const itDays = feeConfig?.mediaworldItPrepDays;
+  const euDays = feeConfig?.mediaworldEuPrepDays;
+  
+  // Validate required fields (should already be validated by orchestrator, but double-check)
+  if (typeof includeEu !== 'boolean' || typeof itDays !== 'number' || typeof euDays !== 'number') {
+    const error = `FAIL-FAST: Mediaworld config mancante o invalido: includeEu=${includeEu}, itDays=${itDays}, euDays=${euDays}`;
+    console.error(`[sync:step:export_mediaworld] ${error}`);
+    await updateStepResult(supabase, runId, 'export_mediaworld', { status: 'failed', error, metrics: {} });
+    return { success: false, error };
+  }
   
   console.log(`[sync:step:export_mediaworld] Starting for run ${runId}, IT days=${itDays}, EU days=${euDays}, includeEU=${includeEu}`);
   const startTime = Date.now();
@@ -1282,6 +1319,9 @@ async function stepExportMediaworld(supabase: any, runId: string, feeConfig: any
     // Update location_warnings in sync_runs
     await updateLocationWarnings(supabase, runId, warnings);
     
+    // Save export file path to sync_runs.steps.exports.files
+    await updateExportFilePath(supabase, runId, 'mediaworld', 'exports/Export Mediaworld.csv');
+    
     await updateStepResult(supabase, runId, 'export_mediaworld', {
       status: 'success', duration_ms: Date.now() - startTime, rows: mwRows.length, skipped: mwSkipped,
       metrics: { mediaworld_export_rows: mwRows.length, mediaworld_export_skipped: mwSkipped }
@@ -1299,9 +1339,18 @@ async function stepExportMediaworld(supabase: any, runId: string, feeConfig: any
 
 // ========== STEP: EXPORT_EPRICE (with IT/EU stock support) ==========
 async function stepExportEprice(supabase: any, runId: string, feeConfig: any): Promise<{ success: boolean; error?: string }> {
-  const includeEu = feeConfig?.epriceIncludeEu || false;
-  const itDays = feeConfig?.epriceItPrepDays || feeConfig?.epricePrepDays || 1;
-  const euDays = feeConfig?.epriceEuPrepDays || 3;
+  // FAIL-FAST: No defaults - these must be set by orchestrator after validation
+  const includeEu = feeConfig?.epriceIncludeEu;
+  const itDays = feeConfig?.epriceItPrepDays;
+  const euDays = feeConfig?.epriceEuPrepDays;
+  
+  // Validate required fields (should already be validated by orchestrator, but double-check)
+  if (typeof includeEu !== 'boolean' || typeof itDays !== 'number' || typeof euDays !== 'number') {
+    const error = `FAIL-FAST: ePrice config mancante o invalido: includeEu=${includeEu}, itDays=${itDays}, euDays=${euDays}`;
+    console.error(`[sync:step:export_eprice] ${error}`);
+    await updateStepResult(supabase, runId, 'export_eprice', { status: 'failed', error, metrics: {} });
+    return { success: false, error };
+  }
   
   console.log(`[sync:step:export_eprice] Starting for run ${runId}, IT days=${itDays}, EU days=${euDays}, includeEU=${includeEu}`);
   const startTime = Date.now();
@@ -1381,6 +1430,9 @@ async function stepExportEprice(supabase: any, runId: string, feeConfig: any): P
       await updateStepResult(supabase, runId, 'export_eprice', { status: 'failed', error, metrics: {} });
       return { success: false, error };
     }
+    
+    // Save export file path to sync_runs.steps.exports.files
+    await updateExportFilePath(supabase, runId, 'eprice', 'exports/Export ePrice.csv');
     
     await updateStepResult(supabase, runId, 'export_eprice', {
       status: 'success', duration_ms: Date.now() - startTime, rows: epRows.length, skipped: epSkipped,
