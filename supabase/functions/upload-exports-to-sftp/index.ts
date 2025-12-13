@@ -4,26 +4,20 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 /**
  * Edge Function: upload-exports-to-sftp
  * 
- * Uploads three export files from the "exports" bucket to an external SFTP server.
+ * Uploads export files from the "exports" bucket to an external SFTP server.
+ * This function ONLY transfers files from the bucket - it does NOT regenerate them.
+ * The files must already be generated and saved by the client.
+ * 
+ * Features:
+ * - Retry policy: 5 attempts per file with progressive backoff (1s, 2s, 4s, 8s, 16s)
+ * - Per-file error handling: continues with other files if one fails
+ * - Detailed error reporting with phase information
  */
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
-
-// Expected file configuration - supports both XLSX and CSV formats
-const EXPECTED_FILES_XLSX = [
-  { bucket: 'exports', path: 'Catalogo EAN.xlsx', filename: 'Catalogo EAN.xlsx' },
-  { bucket: 'exports', path: 'Export ePrice.xlsx', filename: 'Export ePrice.xlsx' },
-  { bucket: 'exports', path: 'Export Mediaworld.xlsx', filename: 'Export Mediaworld.xlsx' }
-];
-
-const EXPECTED_FILES_CSV = [
-  { bucket: 'exports', path: 'Catalogo EAN.csv', filename: 'Catalogo EAN.csv' },
-  { bucket: 'exports', path: 'Export ePrice.csv', filename: 'Export ePrice.csv' },
-  { bucket: 'exports', path: 'Export Mediaworld.csv', filename: 'Export Mediaworld.csv' }
-];
 
 interface FileSpec {
   bucket: string;
@@ -38,8 +32,19 @@ interface RequestBody {
 interface UploadResult {
   filename: string;
   uploaded: boolean;
-  error?: string;
+  attemptsUsed: number;
+  errorDetails?: {
+    message: string;
+    phase: 'download_bucket' | 'upload_sftp';
+    remotePath?: string;
+    stack?: string;
+  };
 }
+
+// Progressive backoff delays in milliseconds
+const BACKOFF_DELAYS = [1000, 2000, 4000, 8000, 16000];
+const MAX_SFTP_RETRIES = 5;
+const MAX_BUCKET_RETRIES = 2;
 
 serve(async (req) => {
   // Handle CORS preflight
@@ -60,7 +65,7 @@ serve(async (req) => {
 
   try {
     // =========================================================================
-    // 1. AUTHENTICATION: Validate JWT or service role key
+    // 1. AUTHENTICATION
     // =========================================================================
     const authHeader = req.headers.get('Authorization');
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -77,13 +82,12 @@ serve(async (req) => {
     const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     
-    // Check if this is a service role key (for internal calls from run-full-sync)
+    // Check if this is a service role key
     let isServiceRole = false;
     if (jwt === supabaseServiceKey) {
-      console.log('[upload-exports-to-sftp] Service role authentication - internal call');
+      console.log('[upload-exports-to-sftp] Service role authentication');
       isServiceRole = true;
     } else {
-      // Validate JWT by getting user
       const userClient = createClient(supabaseUrl, supabaseAnonKey, {
         global: { headers: { Authorization: `Bearer ${jwt}` } }
       });
@@ -115,21 +119,20 @@ serve(async (req) => {
       );
     }
 
-    if (!body.files || !Array.isArray(body.files) || body.files.length !== 3) {
+    if (!body.files || !Array.isArray(body.files) || body.files.length === 0) {
       console.log('[upload-exports-to-sftp] Invalid files array:', body.files);
       return new Response(
         JSON.stringify({ 
           status: 'error', 
-          message: 'Il campo "files" deve contenere esattamente 3 file.' 
+          message: 'Il campo "files" deve contenere almeno 1 file.' 
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Validate each file spec - accept both XLSX and CSV formats
+    // Validate each file spec
     for (let i = 0; i < body.files.length; i++) {
       const file = body.files[i];
-      
       if (!file.bucket || !file.path || !file.filename) {
         console.log('[upload-exports-to-sftp] Invalid file spec:', file);
         return new Response(
@@ -140,54 +143,54 @@ serve(async (req) => {
           { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
-
-      // Check if file matches expected XLSX or CSV format
-      const expectedXlsx = EXPECTED_FILES_XLSX[i];
-      const expectedCsv = EXPECTED_FILES_CSV[i];
-      const matchesXlsx = file.bucket === expectedXlsx?.bucket && file.path === expectedXlsx?.path && file.filename === expectedXlsx?.filename;
-      const matchesCsv = file.bucket === expectedCsv?.bucket && file.path === expectedCsv?.path && file.filename === expectedCsv?.filename;
-      
-      if (!matchesXlsx && !matchesCsv) {
-        console.log('[upload-exports-to-sftp] File spec mismatch:', { file, expectedXlsx, expectedCsv });
-        return new Response(
-          JSON.stringify({ 
-            status: 'error', 
-            message: `File ${i + 1}: configurazione non valida. Attesi formati XLSX o CSV.` 
-          }),
-          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
     }
 
-    console.log('[upload-exports-to-sftp] Request body validated');
+    console.log('[upload-exports-to-sftp] Request body validated, files:', body.files.length);
 
     // =========================================================================
-    // 3. READ FILES FROM BUCKET (using service role for guaranteed access)
+    // 3. READ FILES FROM BUCKET (with retry)
     // =========================================================================
     const serviceClient = createClient(supabaseUrl, supabaseServiceKey);
+    const results: UploadResult[] = [];
     const fileContents: { filename: string; data: Uint8Array }[] = [];
     
     for (const fileSpec of body.files) {
       console.log(`[upload-exports-to-sftp] Reading file: ${fileSpec.path}`);
       
-      const { data: fileData, error: fileError } = await serviceClient.storage
-        .from(fileSpec.bucket)
-        .download(fileSpec.path);
+      let fileData: Blob | null = null;
+      let lastError: string = '';
+      
+      // Retry bucket download up to MAX_BUCKET_RETRIES times
+      for (let attempt = 1; attempt <= MAX_BUCKET_RETRIES; attempt++) {
+        const { data, error } = await serviceClient.storage
+          .from(fileSpec.bucket)
+          .download(fileSpec.path);
 
-      if (fileError || !fileData) {
-        console.error(`[upload-exports-to-sftp] Error reading file ${fileSpec.path}:`, fileError?.message);
-        return new Response(
-          JSON.stringify({ 
-            status: 'error', 
-            message: `Impossibile leggere il file "${fileSpec.filename}" dal bucket "${fileSpec.bucket}". Verifica che il file esista.`,
-            results: body.files.map(f => ({
-              filename: f.filename,
-              uploaded: false,
-              error: f.filename === fileSpec.filename ? 'File non trovato nel bucket' : 'Upload non tentato'
-            }))
-          }),
-          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
+        if (!error && data) {
+          fileData = data;
+          break;
+        }
+        
+        lastError = error?.message || 'Unknown bucket error';
+        console.warn(`[upload-exports-to-sftp] Bucket download attempt ${attempt}/${MAX_BUCKET_RETRIES} failed for ${fileSpec.path}: ${lastError}`);
+        
+        if (attempt < MAX_BUCKET_RETRIES) {
+          await new Promise(r => setTimeout(r, 1000 * attempt));
+        }
+      }
+      
+      if (!fileData) {
+        console.error(`[upload-exports-to-sftp] Failed to read file ${fileSpec.path} after ${MAX_BUCKET_RETRIES} attempts`);
+        results.push({
+          filename: fileSpec.filename,
+          uploaded: false,
+          attemptsUsed: 0,
+          errorDetails: {
+            message: lastError || 'File non trovato nel bucket',
+            phase: 'download_bucket'
+          }
+        });
+        continue; // Continue with other files
       }
 
       const arrayBuffer = await fileData.arrayBuffer();
@@ -199,7 +202,20 @@ serve(async (req) => {
       console.log(`[upload-exports-to-sftp] File read successfully: ${fileSpec.filename} (${arrayBuffer.byteLength} bytes)`);
     }
 
-    console.log('[upload-exports-to-sftp] All files read from bucket');
+    // Check if any files were read successfully
+    if (fileContents.length === 0) {
+      console.error('[upload-exports-to-sftp] No files could be read from bucket');
+      return new Response(
+        JSON.stringify({ 
+          status: 'error', 
+          message: 'Nessun file è stato letto correttamente dal bucket.',
+          results 
+        }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    console.log(`[upload-exports-to-sftp] ${fileContents.length} files read from bucket`);
 
     // =========================================================================
     // 4. SFTP CONFIGURATION CHECK
@@ -210,7 +226,6 @@ serve(async (req) => {
     const sftpPassword = Deno.env.get('SFTP_PASSWORD');
     const sftpBaseDir = Deno.env.get('SFTP_BASE_DIR');
 
-    // Log diagnostic info for SFTP connection (without password)
     console.log('[upload-exports-to-sftp] SFTP Config:', {
       host: sftpHost,
       port: sftpPort,
@@ -224,11 +239,12 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({ 
           status: 'error', 
-          message: 'Configurazione SFTP incompleta. Verifica le variabili ambiente SFTP_HOST, SFTP_PORT, SFTP_USER, SFTP_PASSWORD, SFTP_BASE_DIR.',
+          message: 'Configurazione SFTP incompleta.',
           results: body.files.map(f => ({
             filename: f.filename,
             uploaded: false,
-            error: 'Configurazione SFTP mancante'
+            attemptsUsed: 0,
+            errorDetails: { message: 'Configurazione SFTP mancante', phase: 'upload_sftp' as const }
           }))
         }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -236,44 +252,39 @@ serve(async (req) => {
     }
 
     // =========================================================================
-    // 5. SFTP UPLOAD
+    // 5. SFTP UPLOAD with retry
     // =========================================================================
-    let sftpLibraryAvailable = false;
     let Client: any = null;
     
     try {
-      // Try to dynamically import ssh2
       const ssh2Module = await import("npm:ssh2@1.15.0");
       Client = ssh2Module.Client;
-      sftpLibraryAvailable = true;
-      console.log('[upload-exports-to-sftp] SSH2 library loaded successfully');
+      console.log('[upload-exports-to-sftp] SSH2 library loaded');
     } catch (importError: any) {
-      console.error('[upload-exports-to-sftp] Failed to load SSH2 library:', importError.message);
+      console.error('[upload-exports-to-sftp] Failed to load SSH2:', importError.message);
       return new Response(
         JSON.stringify({ 
           status: 'error', 
-          message: 'Libreria SFTP non disponibile in questo ambiente. Il runtime Deno Edge Functions potrebbe non supportare SSH2.',
+          message: 'Libreria SFTP non disponibile.',
           results: body.files.map(f => ({
             filename: f.filename,
             uploaded: false,
-            error: 'SFTP library not available'
+            attemptsUsed: 0,
+            errorDetails: { message: 'SFTP library not available', phase: 'upload_sftp' as const }
           }))
         }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Proceed with SFTP upload
-    const results: UploadResult[] = [];
     let conn: any = null;
     let sftp: any = null;
     
     try {
-      console.log('[upload-exports-to-sftp] Attempting SSH connection...');
+      console.log('[upload-exports-to-sftp] Connecting to SFTP...');
       
       conn = new Client();
       
-      // Create SSH connection with timeout
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           conn.end();
@@ -311,7 +322,6 @@ serve(async (req) => {
         });
       });
       
-      // Get SFTP session
       sftp = await new Promise<any>((resolve, reject) => {
         conn.sftp((err: Error | null, sftpSession: any) => {
           if (err) {
@@ -329,9 +339,9 @@ serve(async (req) => {
         sftp.stat(sftpBaseDir, (err: Error | null, stats: any) => {
           if (err) {
             console.error('[upload-exports-to-sftp] SFTP directory check failed:', err.message);
-            reject(new Error(`La cartella SFTP "${sftpBaseDir}" non esiste o non è accessibile.`));
+            reject(new Error(`Cartella SFTP "${sftpBaseDir}" non accessibile.`));
           } else if (!stats.isDirectory()) {
-            reject(new Error(`Il percorso SFTP "${sftpBaseDir}" non è una directory.`));
+            reject(new Error(`Percorso SFTP "${sftpBaseDir}" non è una directory.`));
           } else {
             console.log('[upload-exports-to-sftp] SFTP directory verified:', sftpBaseDir);
             resolve();
@@ -339,14 +349,16 @@ serve(async (req) => {
         });
       });
       
-      // Upload each file with retry (max 3 attempts per file)
+      // Upload each file with retry
       for (const file of fileContents) {
         const remotePath = `${sftpBaseDir}/${file.filename}`;
         let uploaded = false;
         let lastError = '';
+        let attemptsUsed = 0;
         
-        for (let attempt = 1; attempt <= 3 && !uploaded; attempt++) {
-          console.log(`[upload-exports-to-sftp] Uploading ${file.filename}, attempt ${attempt}`);
+        for (let attempt = 1; attempt <= MAX_SFTP_RETRIES && !uploaded; attempt++) {
+          attemptsUsed = attempt;
+          console.log(`[upload-exports-to-sftp] Uploading ${file.filename}, attempt ${attempt}/${MAX_SFTP_RETRIES}`);
           
           try {
             await new Promise<void>((resolve, reject) => {
@@ -362,18 +374,18 @@ serve(async (req) => {
                 reject(err);
               });
               
-              // Write the data directly as Uint8Array (Deno compatible)
               writeStream.end(file.data);
             });
             
             uploaded = true;
           } catch (err: any) {
             lastError = err.message || 'Unknown error';
-            console.log(`[upload-exports-to-sftp] Attempt ${attempt} failed for ${file.filename}: ${lastError}`);
+            console.warn(`[upload-exports-to-sftp] Attempt ${attempt} failed for ${file.filename}: ${lastError}`);
             
-            if (attempt < 3) {
-              // Wait before retry (1s, 2s)
-              await new Promise(r => setTimeout(r, 1000 * attempt));
+            if (attempt < MAX_SFTP_RETRIES) {
+              const delay = BACKOFF_DELAYS[attempt - 1] || BACKOFF_DELAYS[BACKOFF_DELAYS.length - 1];
+              console.log(`[upload-exports-to-sftp] Waiting ${delay}ms before retry...`);
+              await new Promise(r => setTimeout(r, delay));
             }
           }
         }
@@ -381,32 +393,37 @@ serve(async (req) => {
         results.push({
           filename: file.filename,
           uploaded,
-          ...(uploaded ? {} : { error: lastError || 'Upload fallito dopo 3 tentativi' })
+          attemptsUsed,
+          ...(uploaded ? {} : {
+            errorDetails: {
+              message: lastError || `Upload fallito dopo ${MAX_SFTP_RETRIES} tentativi`,
+              phase: 'upload_sftp' as const,
+              remotePath
+            }
+          })
         });
       }
       
     } catch (sftpConnectionError: any) {
-      console.error('[upload-exports-to-sftp] SFTP connection/setup error:', sftpConnectionError.message);
+      console.error('[upload-exports-to-sftp] SFTP connection error:', sftpConnectionError.message);
       
-      // Close connection if open
-      if (conn) {
-        try { conn.end(); } catch (e) { /* ignore */ }
-      }
-      
-      return new Response(
-        JSON.stringify({ 
-          status: 'error', 
-          message: `Errore connessione SFTP: ${sftpConnectionError.message}`,
-          results: body.files.map(f => ({
-            filename: f.filename,
+      // Mark all pending files as failed
+      for (const file of fileContents) {
+        const existingResult = results.find(r => r.filename === file.filename);
+        if (!existingResult) {
+          results.push({
+            filename: file.filename,
             uploaded: false,
-            error: sftpConnectionError.message
-          }))
-        }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+            attemptsUsed: 0,
+            errorDetails: {
+              message: sftpConnectionError.message,
+              phase: 'upload_sftp',
+              stack: sftpConnectionError.stack
+            }
+          });
+        }
+      }
     } finally {
-      // Always close connection
       if (conn) {
         try {
           conn.end();
@@ -416,27 +433,25 @@ serve(async (req) => {
     }
 
     // =========================================================================
-    // 6. DETERMINE FINAL RESPONSE
+    // 6. FINAL RESPONSE
     // =========================================================================
-    const allSucceeded = results.every(r => r.uploaded === true);
+    const allSucceeded = results.length === body.files.length && results.every(r => r.uploaded === true);
+    const someSucceeded = results.some(r => r.uploaded === true);
     
     if (allSucceeded) {
-      console.log('[upload-exports-to-sftp] SUCCESS: All files uploaded successfully');
-      // Return HTTP 200 with status: "ok"
+      console.log('[upload-exports-to-sftp] SUCCESS: All files uploaded');
       return new Response(
-        JSON.stringify({ 
-          status: 'ok', 
-          results 
-        }),
+        JSON.stringify({ status: 'ok', results }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     } else {
-      console.error('[upload-exports-to-sftp] FAILURE: Some files failed to upload');
-      // Return HTTP 500 with status: "error"
+      const failedCount = results.filter(r => !r.uploaded).length;
+      const successCount = results.filter(r => r.uploaded).length;
+      console.error(`[upload-exports-to-sftp] PARTIAL: ${successCount} succeeded, ${failedCount} failed`);
       return new Response(
         JSON.stringify({ 
           status: 'error', 
-          message: 'Alcuni file non sono stati caricati correttamente sul server SFTP.',
+          message: `${successCount}/${body.files.length} file caricati. ${failedCount} falliti.`,
           results 
         }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -450,7 +465,7 @@ serve(async (req) => {
     return new Response(
       JSON.stringify({ 
         status: 'error', 
-        message: `Errore interno del server: ${error.message}` 
+        message: `Errore interno: ${error.message}` 
       }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
