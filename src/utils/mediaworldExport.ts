@@ -29,7 +29,7 @@ import {
 // Questi valori devono corrispondere esattamente al template ufficiale
 // "mediaworld-template.xlsx"
 // =====================================================================
-const MEDIAWORLD_TEMPLATE = {
+export const MEDIAWORLD_TEMPLATE = {
   sheetName: "Data",
   headers: [
     'SKU offerta',
@@ -91,7 +91,7 @@ const MEDIAWORLD_TEMPLATE = {
 // Keep MEDIAWORLD_HEADERS_ITALIAN for backward compatibility
 const MEDIAWORLD_HEADERS_ITALIAN = MEDIAWORLD_TEMPLATE.headers;
 
-interface MediaworldExportParams {
+export interface MediaworldExportParams {
   processedData: any[];
   feeConfig: {
     feeDrev: number;
@@ -107,11 +107,27 @@ interface MediaworldExportParams {
   euDays: number;
 }
 
-interface ValidationError {
+export interface ValidationError {
   row: number;
   sku: string;
   field: string;
   reason: string;
+}
+
+export interface MediaworldBuildResult {
+  success: boolean;
+  blob?: Blob;
+  buffer?: Uint8Array;
+  rowCount: number;
+  skippedCount: number;
+  validationErrors: ValidationError[];
+  diagnostics: {
+    euOnlyTotal: number;
+    euOnlyExported: number;
+    itOnlyCount: number;
+    itAndEuCount: number;
+  };
+  error?: string;
 }
 
 interface TemplateValidation {
@@ -125,6 +141,8 @@ interface TemplateValidation {
   max?: number;
   decimals?: number;
 }
+
+// Duplicate declarations removed - already defined above
 
 /**
  * Validate Mediaworld file structure against official template
@@ -300,6 +318,359 @@ function parsePrice(value: unknown): number | null {
   
   const num = parseFloat(str);
   return Number.isFinite(num) ? num : null;
+}
+
+/**
+ * Build Mediaworld XLSX from EAN catalog dataset.
+ * Returns blob and buffer for both download and bucket upload.
+ * Uses resolveMarketplaceStock for quantity and leadDays.
+ * includeEu defaults to true if not explicitly set to false.
+ */
+export async function buildMediaworldXlsxFromEanDataset({
+  processedData,
+  feeConfig,
+  prepDays,
+  stockLocationIndex,
+  stockLocationWarnings,
+  includeEu,
+  itDays,
+  euDays
+}: MediaworldExportParams): Promise<MediaworldBuildResult> {
+  try {
+    const validationErrors: ValidationError[] = [];
+    let skippedCount = 0;
+    
+    // Diagnostic counters
+    let euOnlyTotal = 0;
+    let euOnlyExported = 0;
+    let itOnlyCount = 0;
+    let itAndEuCount = 0;
+    
+    // Ensure includeEu defaults to true
+    const effectiveIncludeEu = includeEu === false ? false : true;
+    
+    // Load template from public folder
+    const templateResponse = await fetch('/mediaworld-template.xlsx');
+    if (!templateResponse.ok) {
+      return { 
+        success: false, 
+        error: 'Template Mediaworld non trovato',
+        rowCount: 0,
+        skippedCount: 0,
+        validationErrors: [],
+        diagnostics: { euOnlyTotal: 0, euOnlyExported: 0, itOnlyCount: 0, itAndEuCount: 0 }
+      };
+    }
+    
+    const templateBuffer = await templateResponse.arrayBuffer();
+    const templateWb = XLSX.read(templateBuffer, { type: 'array' });
+    
+    const dataRows: (string | number)[][] = [];
+    
+    console.log('%c[Mediaworld:buildXlsx:start]', 'color: #00BCD4;', {
+      inputRows: processedData.length,
+      includeEu: effectiveIncludeEu,
+      itDays,
+      euDays,
+      stockLocationIndex_loaded: !!stockLocationIndex
+    });
+    
+    const warnings = stockLocationWarnings || { 
+      missing_location_file: 0, invalid_location_parse: 0, missing_location_data: 0,
+      split_mismatch: 0, multi_mpn_per_matnr: 0, orphan_4255: 0, 
+      decode_fallback_used: 0, invalid_stock_value: 0 
+    };
+    
+    processedData.forEach((record, index) => {
+      const sku = record.ManufPartNr || '';
+      const ean = record.EAN || '';
+      const matnr = record.Matnr || '';
+      const existingStock = Number(record.ExistingStock) || 0;
+      
+      // Filter 1: Valid EAN required
+      if (!ean || ean.trim() === '' || ean.length < 12) {
+        validationErrors.push({
+          row: index + 1,
+          sku: sku || 'N/A',
+          field: 'ID Prodotto',
+          reason: `EAN mancante o non valido: "${ean}"`
+        });
+        skippedCount++;
+        return;
+      }
+      
+      // Get IT/EU stock
+      const { stockIT, stockEU } = getStockForMatnr(
+        stockLocationIndex || null,
+        matnr,
+        existingStock,
+        warnings,
+        true
+      );
+      
+      if (stockLocationIndex) {
+        checkSplitMismatch(stockIT, stockEU, existingStock, warnings);
+      }
+      
+      // Track stock distribution
+      const hasIT = stockIT >= 2;
+      const hasEU = stockEU >= 2;
+      if (hasIT && hasEU) itAndEuCount++;
+      else if (hasIT) itOnlyCount++;
+      else if (hasEU) euOnlyTotal++;
+      
+      // Use resolveMarketplaceStock for quantity and lead time
+      const stockResult = resolveMarketplaceStock(
+        stockIT,
+        stockEU,
+        effectiveIncludeEu,
+        itDays,
+        euDays
+      );
+      
+      // Filter 2: Stock threshold (min 2)
+      if (!stockResult.shouldExport) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'Quantità',
+          reason: `Stock insufficiente: IT=${stockIT}, EU=${stockEU}, includeEU=${effectiveIncludeEu}`
+        });
+        skippedCount++;
+        return;
+      }
+      
+      // Track EU-only exported
+      if (!hasIT && hasEU && stockResult.shouldExport) {
+        euOnlyExported++;
+      }
+      
+      // Validate SKU
+      if (!sku || sku.trim() === '') {
+        validationErrors.push({
+          row: index + 1,
+          sku: 'N/A',
+          field: 'SKU offerta',
+          reason: 'ManufPartNr mancante o vuoto'
+        });
+        skippedCount++;
+        return;
+      }
+      
+      if (sku.length > 40) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'SKU offerta',
+          reason: `SKU troppo lungo (${sku.length} caratteri, max 40)`
+        });
+        skippedCount++;
+        return;
+      }
+      
+      // Get prices from EAN catalog (NO recalculation)
+      const listPriceConFee = parsePrice(record['ListPrice con Fee']);
+      const prezzoFinale = parsePrice(record['Prezzo Finale']);
+      
+      if (listPriceConFee === null || listPriceConFee <= 0) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: "Prezzo dell'offerta",
+          reason: `ListPrice con Fee non valido: ${record['ListPrice con Fee']}`
+        });
+        skippedCount++;
+        return;
+      }
+      
+      if (prezzoFinale === null || prezzoFinale <= 0) {
+        validationErrors.push({
+          row: index + 1,
+          sku,
+          field: 'Prezzo scontato',
+          reason: `Prezzo Finale non valido: ${record['Prezzo Finale']}`
+        });
+        skippedCount++;
+        return;
+      }
+      
+      // Log first 20 records for diagnostics
+      if (index < 20) {
+        console.log(`%c[Mediaworld:row${index}]`, 'color: #00BCD4;', {
+          sku, ean, stockIT, stockEU,
+          exportQty: stockResult.exportQty,
+          leadDays: stockResult.leadDays,
+          source: stockResult.source,
+          listPriceConFee,
+          prezzoFinale
+        });
+      }
+      
+      // Build row (22 columns)
+      dataRows.push([
+        sku,
+        ean,
+        'EAN',
+        record.ShortDescription || '',
+        '',
+        listPriceConFee,
+        '',
+        stockResult.exportQty,
+        '',
+        'Nuovo',
+        '',
+        '',
+        'Consegna gratuita',
+        prezzoFinale,
+        '',
+        '',
+        stockResult.leadDays, // NO offset - exactly as configured
+        '',
+        'recommended-retail-price',
+        '',
+        '',
+        ''
+      ]);
+    });
+    
+    const rowCount = dataRows.length;
+    
+    console.log('%c[Mediaworld:buildXlsx:complete]', 'color: #00BCD4; font-weight: bold;', {
+      inputRows: processedData.length,
+      exportedRows: rowCount,
+      skippedRows: skippedCount,
+      euOnlyTotal,
+      euOnlyExported,
+      itOnlyCount,
+      itAndEuCount,
+      includeEu: effectiveIncludeEu
+    });
+    
+    if (rowCount === 0) {
+      return {
+        success: false,
+        error: `Nessuna riga valida. ${skippedCount} righe scartate.`,
+        rowCount: 0,
+        skippedCount,
+        validationErrors,
+        diagnostics: { euOnlyTotal, euOnlyExported, itOnlyCount, itAndEuCount }
+      };
+    }
+    
+    // Use template workbook directly
+    const wb = templateWb;
+    const dataSheet = wb.Sheets['Data'];
+    
+    if (!dataSheet) {
+      return {
+        success: false,
+        error: 'Foglio "Data" non trovato nel template Mediaworld',
+        rowCount: 0,
+        skippedCount,
+        validationErrors,
+        diagnostics: { euOnlyTotal, euOnlyExported, itOnlyCount, itAndEuCount }
+      };
+    }
+    
+    // Write data starting from row 3 (index 2)
+    const DATA_START_ROW = 2;
+    
+    dataRows.forEach((row, dataIndex) => {
+      const rowIndex = DATA_START_ROW + dataIndex;
+      row.forEach((value, colIndex) => {
+        const addr = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+        if (typeof value === 'number') {
+          dataSheet[addr] = { v: value, t: 'n' };
+        } else {
+          dataSheet[addr] = { v: value, t: 's' };
+        }
+      });
+    });
+    
+    // Update sheet range
+    const lastRow = DATA_START_ROW + dataRows.length - 1;
+    const lastCol = MEDIAWORLD_TEMPLATE.headers.length - 1;
+    dataSheet['!ref'] = XLSX.utils.encode_range({
+      s: { r: 0, c: 0 },
+      e: { r: lastRow, c: lastCol }
+    });
+    
+    // Force EAN column (B) to text
+    const eanCol = 1;
+    for (let R = DATA_START_ROW; R <= lastRow; R++) {
+      const addr = XLSX.utils.encode_cell({ r: R, c: eanCol });
+      const cell = dataSheet[addr];
+      if (cell) {
+        cell.v = (cell.v ?? '').toString();
+        cell.t = 's';
+        cell.z = '@';
+      }
+    }
+    
+    // Format price columns with 2 decimals
+    const priceCols = [5, 13];
+    for (let R = DATA_START_ROW; R <= lastRow; R++) {
+      for (const C of priceCols) {
+        const addr = XLSX.utils.encode_cell({ r: R, c: C });
+        const cell = dataSheet[addr];
+        if (cell && typeof cell.v === 'number') {
+          cell.t = 'n';
+          cell.z = '0.00';
+        }
+      }
+    }
+    
+    // Serialize to ArrayBuffer
+    const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    const uint8Buffer = new Uint8Array(buffer);
+    
+    // Create blob
+    const blob = new Blob([buffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
+    
+    return {
+      success: true,
+      blob,
+      buffer: uint8Buffer,
+      rowCount,
+      skippedCount,
+      validationErrors,
+      diagnostics: { euOnlyTotal, euOnlyExported, itOnlyCount, itAndEuCount }
+    };
+    
+  } catch (error) {
+    console.error('Errore buildMediaworldXlsx:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Errore sconosciuto',
+      rowCount: 0,
+      skippedCount: 0,
+      validationErrors: [],
+      diagnostics: { euOnlyTotal: 0, euOnlyExported: 0, itOnlyCount: 0, itAndEuCount: 0 }
+    };
+  }
+}
+
+/**
+ * Download Mediaworld XLSX to browser.
+ */
+export function downloadMediaworldBlob(blob: Blob, filename?: string): void {
+  const now = new Date();
+  const dateStamp = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const fileName = filename || `mediaworld-offers-${dateStamp}.xlsx`;
+  
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
 }
 
 export async function exportMediaworldCatalog({

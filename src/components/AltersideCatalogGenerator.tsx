@@ -18,7 +18,8 @@ import {
   type OverrideError,
   type OverrideStats
 } from '@/utils/override';
-import { exportMediaworldCatalog } from '@/utils/mediaworldExport';
+import { exportMediaworldCatalog, buildMediaworldXlsxFromEanDataset, downloadMediaworldBlob } from '@/utils/mediaworldExport';
+import { buildEpriceXlsxFromEanDataset, downloadEpriceBlob } from '@/utils/epriceExport';
 import { 
   toComma99Cents, 
   validateEnding99, 
@@ -3199,103 +3200,55 @@ const AltersideCatalogGenerator: React.FC = () => {
       setSftpUploadStatus({ phase: 'saving', message: 'Salvataggio file nel bucket...' });
       
       try {
-        // Generate ePrice export
-        console.log('[EAN:sftp] Generating ePrice export...');
-        const ePriceDataset = finalDataset.map((record: any) => {
-          const prezzoFinaleRaw = record['Prezzo Finale'];
-          let price = 0;
-          if (typeof prezzoFinaleRaw === 'string') {
-            price = parseFloat(prezzoFinaleRaw.replace(',', '.'));
-          } else if (typeof prezzoFinaleRaw === 'number') {
-            price = prezzoFinaleRaw;
-          }
-
-          return {
-            'sku': record.ManufPartNr || '',
-            'product-id': record.EAN || '',
-            'product-id-type': 'EAN',
-            'price': price,
-            'quantity': record.ExistingStock || 0,
-            'state': 11,
-            'fulfillment-latency': prepDays,
-            'logistic-class': 'K'
-          };
-        }).filter((r: any) => r['product-id'] && r['product-id'].length >= 12 && r.quantity > 0);
-
-        const ePriceWs = XLSX.utils.json_to_sheet(ePriceDataset);
-        const ePriceWb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(ePriceWb, ePriceWs, "Tracciato_Inserimento_Offerte");
-        const ePriceBuffer = XLSX.write(ePriceWb, { bookType: "xlsx", type: "array" });
-        const ePriceBlob = new Blob([ePriceBuffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-
-        // Generate Mediaworld export
-        console.log('[EAN:sftp] Generating Mediaworld export...');
-        const templateResponse = await fetch('/mediaworld-template.xlsx');
-        if (!templateResponse.ok) {
-          throw new Error('Template Mediaworld non trovato');
-        }
-        const templateBuffer = await templateResponse.arrayBuffer();
-        const templateWb = XLSX.read(templateBuffer, { type: 'array' });
-        const dataSheet = templateWb.Sheets['Data'];
+        // =====================================================================
+        // Build ePrice and Mediaworld using NEW utility functions
+        // These use resolveMarketplaceStock with correct IT/EU logic
+        // =====================================================================
+        console.log('[EAN:sftp] Building ePrice export with IT/EU logic...');
         
-        if (!dataSheet) {
-          throw new Error('Foglio "Data" non trovato nel template Mediaworld');
+        // Ensure includeEu defaults to true
+        const epriceIncludeEu = extendedFeeConfig.epriceIncludeEu === false ? false : true;
+        const mediaworldIncludeEu = extendedFeeConfig.mediaworldIncludeEu === false ? false : true;
+        
+        const epriceResult = buildEpriceXlsxFromEanDataset({
+          eanDataset: finalDataset,
+          stockLocationIndex: stockLocationIndex,
+          stockLocationWarnings: stockLocationWarnings,
+          includeEu: epriceIncludeEu,
+          itDays: extendedFeeConfig.epriceItPreparationDays,
+          euDays: extendedFeeConfig.epriceEuPreparationDays
+        });
+        
+        if (!epriceResult.success || !epriceResult.blob) {
+          throw new Error(`ePrice build failed: ${epriceResult.errors.length} errors`);
         }
-
-        const mediaworldRows: any[][] = [];
-        finalDataset.forEach((record: any) => {
-          const ean = record.EAN || '';
-          const sku = record.ManufPartNr || '';
-          const stock = Number(record.ExistingStock) || 0;
-          
-          if (!ean || ean.length < 12 || stock <= 0 || !sku) return;
-
-          const prezzoFinaleRaw = record['Prezzo Finale'];
-          const listPriceConFeeRaw = record['ListPrice con Fee'];
-          
-          let prezzoFinale = 0;
-          if (typeof prezzoFinaleRaw === 'string') {
-            prezzoFinale = parseFloat(prezzoFinaleRaw.replace(',', '.'));
-          } else if (typeof prezzoFinaleRaw === 'number') {
-            prezzoFinale = prezzoFinaleRaw;
-          }
-
-          let listPriceConFee = 0;
-          if (typeof listPriceConFeeRaw === 'number') {
-            listPriceConFee = listPriceConFeeRaw;
-          } else if (typeof listPriceConFeeRaw === 'string') {
-            listPriceConFee = parseFloat(listPriceConFeeRaw.replace(',', '.'));
-          }
-
-          if (prezzoFinale <= 0 || listPriceConFee <= 0) return;
-
-          mediaworldRows.push([
-            sku, ean, 'EAN', record.ShortDescription || '', '',
-            listPriceConFee, '', stock, '', 'Nuovo', '', '',
-            'Consegna gratuita', prezzoFinale, '', '',
-            prepDaysMediaworld, '', 'recommended-retail-price', '', '', ''
-          ]);
+        
+        console.log('[EAN:sftp] Building Mediaworld export with IT/EU logic...');
+        const mediaworldResult = await buildMediaworldXlsxFromEanDataset({
+          processedData: finalDataset,
+          feeConfig,
+          prepDays: extendedFeeConfig.mediaworldItPreparationDays,
+          stockLocationIndex: stockLocationIndex,
+          stockLocationWarnings: stockLocationWarnings,
+          includeEu: mediaworldIncludeEu,
+          itDays: extendedFeeConfig.mediaworldItPreparationDays,
+          euDays: extendedFeeConfig.mediaworldEuPreparationDays
+        });
+        
+        if (!mediaworldResult.success || !mediaworldResult.blob) {
+          throw new Error(`Mediaworld build failed: ${mediaworldResult.error || 'Unknown error'}`);
+        }
+        
+        console.log('[EAN:sftp] Export builds complete:', {
+          epriceRows: epriceResult.rowCount,
+          mediaworldRows: mediaworldResult.rowCount
         });
 
-        const startRow = 2;
-        mediaworldRows.forEach((row, rowIndex) => {
-          row.forEach((value, colIndex) => {
-            const addr = XLSX.utils.encode_cell({ r: startRow + rowIndex, c: colIndex });
-            dataSheet[addr] = typeof value === 'number' ? { v: value, t: 'n' } : { v: value, t: 's' };
-          });
-        });
-
-        const endRow = startRow + mediaworldRows.length - 1;
-        dataSheet['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: endRow, c: 21 } });
-
-        const mediaworldBuffer = XLSX.write(templateWb, { bookType: "xlsx", type: "array" });
-        const mediaworldBlob = new Blob([mediaworldBuffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-
-        // Upload all 3 files to bucket
+        // Upload all 3 files to bucket (using the SAME blobs for download and SFTP)
         const filesToUpload = [
           { name: 'Catalogo EAN.xlsx', blob: blob },
-          { name: 'Export ePrice.xlsx', blob: ePriceBlob },
-          { name: 'Export Mediaworld.xlsx', blob: mediaworldBlob }
+          { name: 'Export ePrice.xlsx', blob: epriceResult.blob },
+          { name: 'Export Mediaworld.xlsx', blob: mediaworldResult.blob }
         ];
 
         for (const file of filesToUpload) {
