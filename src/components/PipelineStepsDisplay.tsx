@@ -13,6 +13,7 @@ export interface PipelineStep {
     warnings?: string[];
     errors?: string[];
     counters?: Record<string, number>;
+    info?: string[];  // Informative messages (not warnings)
   };
 }
 
@@ -63,8 +64,8 @@ const getStatusBadge = (status: StepStatus) => {
 const StepDetails: React.FC<{ details: PipelineStep['details'] }> = ({ details }) => {
   if (!details) return null;
   
-  const { warnings = [], errors = [], counters = {} } = details;
-  const hasContent = warnings.length > 0 || errors.length > 0 || Object.keys(counters).length > 0;
+  const { warnings = [], errors = [], counters = {}, info = [] } = details;
+  const hasContent = warnings.length > 0 || errors.length > 0 || Object.keys(counters).length > 0 || info.length > 0;
   
   if (!hasContent) return null;
   
@@ -110,6 +111,18 @@ const StepDetails: React.FC<{ details: PipelineStep['details'] }> = ({ details }
           </ul>
         </div>
       )}
+      
+      {/* Info (informative, not warnings) */}
+      {info.length > 0 && (
+        <div className="text-xs space-y-1">
+          <div className="font-medium text-blue-700">Info:</div>
+          <ul className="list-disc list-inside text-blue-600 max-h-24 overflow-y-auto">
+            {info.map((msg, i) => (
+              <li key={i}>{msg}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 };
@@ -131,8 +144,8 @@ export const PipelineStepsDisplay: React.FC<PipelineStepsDisplayProps> = ({ step
   
   const hasDetails = (step: PipelineStep): boolean => {
     if (!step.details) return false;
-    const { warnings = [], errors = [], counters = {} } = step.details;
-    return warnings.length > 0 || errors.length > 0 || Object.keys(counters).length > 0;
+    const { warnings = [], errors = [], counters = {}, info = [] } = step.details;
+    return warnings.length > 0 || errors.length > 0 || Object.keys(counters).length > 0 || info.length > 0;
   };
   
   return (
@@ -149,7 +162,9 @@ export const PipelineStepsDisplay: React.FC<PipelineStepsDisplayProps> = ({ step
         
         <div className="space-y-3">
           {steps.map((step) => {
-            const canExpand = hasDetails(step) && (step.status === 'warning' || step.status === 'error');
+            // Allow expansion for warning/error or when there's info content to show
+            const hasInfoContent = step.details?.info && step.details.info.length > 0;
+            const canExpand = hasDetails(step) && (step.status === 'warning' || step.status === 'error' || hasInfoContent);
             const isExpanded = expandedSteps.has(step.id);
             
             return (

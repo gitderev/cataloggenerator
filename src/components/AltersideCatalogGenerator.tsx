@@ -14,9 +14,10 @@ import {
   processEANPrefillWithNormalization,
   generatePrefillSummary,
   generateScientificNotationWarning,
+  generateEPlusSubstringInfo,
   hasScientificNotationWarnings,
   sanitizeMPN,
-  detectScientificNotation,
+  isScientificNotation,
   normalizeEANForComparison,
   type EANPrefillExtendedCounters,
   type EANPrefillExtendedReports,
@@ -4780,13 +4781,15 @@ const AltersideCatalogGenerator: React.FC = () => {
         console.warn('prefill:scientific_notation', scientificWarning);
       }
       
-      // Log summary
+      // Log summary with new counters
       console.log('prefill:summary', {
         filled_now: counters.filled_now,
         already_populated: counters.already_populated,
         materialWinsDifferentEan: counters.materialWinsDifferentEan,
         materialNormalizedMatchesMapping: counters.materialNormalizedMatchesMapping,
         ambiguousMapping: counters.ambiguousMapping,
+        mpnWithEPlusSubstringMaterial: counters.mpnWithEPlusSubstringMaterial,
+        mpnWithEPlusSubstringMapping: counters.mpnWithEPlusSubstringMapping,
         mpnScientificNotationMaterial: counters.mpnScientificNotationFoundMaterial,
         mpnScientificNotationMapping: counters.mpnScientificNotationFoundMapping
       });
@@ -4935,6 +4938,19 @@ const AltersideCatalogGenerator: React.FC = () => {
         const ws7 = XLSX.utils.json_to_sheet(eanPrefillReports.mpnScientificNotationMapping);
         XLSX.utils.book_append_sheet(wb, ws7, "mpn_scientific_mapping");
         forceColumnsAsText(ws7, ['ean']);
+      }
+      
+      // Sheet 8: MPN with E+ Substring - Material (valid SKUs, informative)
+      if (eanPrefillReports.mpnWithEPlusSubstringMaterial && eanPrefillReports.mpnWithEPlusSubstringMaterial.length > 0) {
+        const ws8a = XLSX.utils.json_to_sheet(eanPrefillReports.mpnWithEPlusSubstringMaterial);
+        XLSX.utils.book_append_sheet(wb, ws8a, "mpn_eplus_material");
+      }
+      
+      // Sheet 9: MPN with E+ Substring - Mapping (valid SKUs, informative)
+      if (eanPrefillReports.mpnWithEPlusSubstringMapping && eanPrefillReports.mpnWithEPlusSubstringMapping.length > 0) {
+        const ws8b = XLSX.utils.json_to_sheet(eanPrefillReports.mpnWithEPlusSubstringMapping);
+        XLSX.utils.book_append_sheet(wb, ws8b, "mpn_eplus_mapping");
+        forceColumnsAsText(ws8b, ['ean']);
       }
       
       // Sheet 8: Duplicate MPN Rows
@@ -5136,23 +5152,27 @@ const AltersideCatalogGenerator: React.FC = () => {
           const hasConflicts = prefillCounters && (prefillCounters.ambiguousMapping > 0 || prefillCounters.materialWinsDifferentEan > 0);
           const hasWarnings = hasScientificWarning || hasConflicts;
           
+          // Only show warning icon for TRUE scientific notation, not for E+ substrings
+          const ePlusInfo = generateEPlusSubstringInfo(prefillCounters);
+          
           updatePipelineStep('ean_prefill', { 
             status: hasWarnings ? 'warning' : 'done', 
-            summary: prefillSummary + (hasScientificWarning ? ' ⚠️ MPN E+' : ''),
-            details: hasWarnings && prefillCounters ? {
+            summary: prefillSummary + (hasScientificWarning ? ' ⚠️ Parser coercion' : ''),
+            details: (hasWarnings || ePlusInfo) && prefillCounters ? {
               counters: {
                 'EAN riempiti': prefillCounters.filled_now,
                 'Già popolati': prefillCounters.already_populated,
                 'Vince Material (diverso)': prefillCounters.materialWinsDifferentEan,
                 'Match normalizzati': prefillCounters.materialNormalizedMatchesMapping,
                 'Ambigui (non prefillati)': prefillCounters.ambiguousMapping,
-                'MPN E+ Material': prefillCounters.mpnScientificNotationFoundMaterial,
-                'MPN E+ Mapping': prefillCounters.mpnScientificNotationFoundMapping
+                'MPN con E+ (SKU validi)': prefillCounters.mpnWithEPlusSubstringMaterial + prefillCounters.mpnWithEPlusSubstringMapping,
+                'MPN formato scientifico (coercizione)': prefillCounters.mpnScientificNotationFoundMaterial + prefillCounters.mpnScientificNotationFoundMapping
               },
               warnings: [
                 ...(hasScientificWarning ? [generateScientificNotationWarning(prefillCounters) || ''] : []),
                 ...(prefillCounters.ambiguousMapping > 0 ? [`${prefillCounters.ambiguousMapping} mapping ambigui`] : [])
-              ].filter(Boolean)
+              ].filter(Boolean),
+              info: ePlusInfo ? [ePlusInfo] : undefined
             } : undefined
           });
         } catch (prefillError) {
