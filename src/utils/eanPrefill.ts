@@ -2,7 +2,8 @@
  * EAN Prefill Utilities
  * 
  * This module provides utilities for the EAN prefill step, including:
- * - MPN scientific notation detection
+ * - MPN scientific notation detection (TRUE format like 1.23E+05)
+ * - MPN "E+" string detection (valid SKUs like ABC1234E+XYZ)
  * - EAN normalization (reuses same algorithm as EAN pipeline)
  * - Conflict classification with proper precedence rules
  */
@@ -11,13 +12,39 @@
 export { normalizeEAN, type EANResult } from './ean';
 
 /**
- * Detects if an MPN value contains scientific notation (E+ or E-)
- * This indicates the MPN was incorrectly parsed as a number
+ * Detects if an MPN value is in TRUE scientific notation format
+ * This means the ENTIRE string is a number in scientific notation (e.g., 1.23E+05, 5e-3)
+ * 
+ * This indicates the MPN was incorrectly parsed/coerced from a number during import.
+ * 
+ * Valid SKUs like "ABC1234E+XYZ" will NOT be flagged - they contain "E+" as a substring
+ * but are NOT in scientific notation format.
+ * 
+ * @returns true only if the entire string matches scientific notation pattern
+ */
+export function isScientificNotation(value: string): boolean {
+  if (!value || typeof value !== 'string') return false;
+  // Pattern: entire string must be a scientific notation number
+  // Examples that match: "1.23E+05", "5e-3", "-2.5e+10", "123e5"
+  // Examples that DON'T match: "ABC1234E+XYZ", "SKU-E+123", "1234E+ABC"
+  return /^[+-]?\d+(?:[.,]\d+)?[eE][+-]?\d+$/.test(value.trim());
+}
+
+/**
+ * Legacy function - now redirects to isScientificNotation
+ * @deprecated Use isScientificNotation instead
  */
 export function detectScientificNotation(value: string): boolean {
+  return isScientificNotation(value);
+}
+
+/**
+ * Counts occurrences of "E+" substring in a string (case-insensitive)
+ * This is used to count valid SKUs that contain "E+" as part of their name
+ */
+export function countEPlusSubstring(value: string): boolean {
   if (!value || typeof value !== 'string') return false;
-  // Pattern: digits followed by e+/e- and more digits (case insensitive)
-  return /[0-9]\.?[0-9]*e[+-]?[0-9]+/i.test(value);
+  return /e\+/i.test(value);
 }
 
 /**
@@ -88,11 +115,15 @@ export interface EANPrefillExtendedCounters {
   missing_mapping_in_new_file: number;
   errori_formali: number;
   
-  // NEW: Scientific notation detection
+  // MPN with "E+" substring (valid SKUs like ABC1234E+XYZ) - informative only, NOT a warning
+  mpnWithEPlusSubstringMaterial: number;
+  mpnWithEPlusSubstringMapping: number;
+  
+  // TRUE scientific notation (e.g., 1.23E+05) - indicates parser coercion - THIS IS A WARNING
   mpnScientificNotationFoundMaterial: number;
   mpnScientificNotationFoundMapping: number;
   
-  // NEW: Conflict classification
+  // Conflict classification
   materialWinsDifferentEan: number;      // Case 2A: Material has EAN, mapping has different EAN → Material wins
   materialNormalizedMatchesMapping: number; // Case 2B/2C: EANs match after normalization
   ambiguousMapping: number;               // Case 3: Multiple different EANs for same MPN in mapping
@@ -105,7 +136,7 @@ export interface EANPrefillExtendedReports {
   updated: Array<{ ManufPartNr: string; EAN_old: string; EAN_new: string; EAN_new_normalized: string }>;
   already_populated: Array<{ ManufPartNr: string; EAN_existing: string; EAN_existing_normalized: string }>;
   
-  // NEW: Material wins different EAN (Case 2A)
+  // Material wins different EAN (Case 2A)
   materialWinsDifferentEan: Array<{
     ManufPartNr: string;
     EAN_material_raw: string;
@@ -114,7 +145,7 @@ export interface EANPrefillExtendedReports {
     EAN_mapping_norm: string;
   }>;
   
-  // NEW: Normalized match (Case 2B/2C)
+  // Normalized match (Case 2B/2C)
   materialNormalizedMatchesMapping: Array<{
     ManufPartNr: string;
     EAN_material_raw: string;
@@ -122,16 +153,20 @@ export interface EANPrefillExtendedReports {
     EAN_normalized: string;
   }>;
   
-  // NEW: Ambiguous mapping (Case 3)
+  // Ambiguous mapping (Case 3)
   ambiguousMapping: Array<{
     ManufPartNr: string;
     candidates_raw: string[];
     candidates_normalized: string[];
   }>;
   
-  // NEW: Scientific notation warnings
+  // TRUE scientific notation (parser coercion) - WARNING
   mpnScientificNotationMaterial: Array<{ ManufPartNr: string; row_index: number }>;
   mpnScientificNotationMapping: Array<{ mpn: string; ean: string; row_index: number }>;
+  
+  // MPN with "E+" substring (valid SKUs) - informative only
+  mpnWithEPlusSubstringMaterial: Array<{ ManufPartNr: string; row_index: number }>;
+  mpnWithEPlusSubstringMapping: Array<{ mpn: string; ean: string; row_index: number }>;
   
   // Kept from original
   duplicate_mpn_rows: Array<{ mpn: string; ean_seen_first: string; ean_conflicting: string; row_index: number }>;
@@ -157,6 +192,8 @@ export function createEmptyExtendedCounters(): EANPrefillExtendedCounters {
     empty_ean_rows: 0,
     missing_mapping_in_new_file: 0,
     errori_formali: 0,
+    mpnWithEPlusSubstringMaterial: 0,
+    mpnWithEPlusSubstringMapping: 0,
     mpnScientificNotationFoundMaterial: 0,
     mpnScientificNotationFoundMapping: 0,
     materialWinsDifferentEan: 0,
@@ -177,6 +214,8 @@ export function createEmptyExtendedReports(): EANPrefillExtendedReports {
     ambiguousMapping: [],
     mpnScientificNotationMaterial: [],
     mpnScientificNotationMapping: [],
+    mpnWithEPlusSubstringMaterial: [],
+    mpnWithEPlusSubstringMapping: [],
     duplicate_mpn_rows: [],
     mpn_not_in_material: [],
     empty_ean_rows: [],
@@ -237,14 +276,27 @@ export function processEANPrefillWithNormalization(
     const mpn = sanitizeMPN(parts[0]);
     const ean_raw = (parts[1] ?? '').trim();
     
-    // Detect scientific notation in MPN from mapping
-    if (detectScientificNotation(mpn)) {
+    // Detect TRUE scientific notation (parser coercion) - this is a WARNING
+    if (isScientificNotation(mpn)) {
       counters.mpnScientificNotationFoundMapping++;
-      reports.mpnScientificNotationMapping.push({
-        mpn,
-        ean: ean_raw,
-        row_index: i + 1
-      });
+      if (reports.mpnScientificNotationMapping.length < 20) {
+        reports.mpnScientificNotationMapping.push({
+          mpn,
+          ean: ean_raw,
+          row_index: i + 1
+        });
+      }
+    }
+    // Detect "E+" substring (valid SKUs) - this is informative only
+    else if (countEPlusSubstring(mpn)) {
+      counters.mpnWithEPlusSubstringMapping++;
+      if (reports.mpnWithEPlusSubstringMapping.length < 10) {
+        reports.mpnWithEPlusSubstringMapping.push({
+          mpn,
+          ean: ean_raw,
+          row_index: i + 1
+        });
+      }
     }
     
     if (!ean_raw) {
@@ -302,13 +354,25 @@ export function processEANPrefillWithNormalization(
     if (mpn) {
       materialMPNs.add(mpn);
       
-      // Detect scientific notation in MPN from material
-      if (detectScientificNotation(mpn)) {
+      // Detect TRUE scientific notation (parser coercion) - this is a WARNING
+      if (isScientificNotation(mpn)) {
         counters.mpnScientificNotationFoundMaterial++;
-        reports.mpnScientificNotationMaterial.push({
-          ManufPartNr: mpn,
-          row_index: index + 1
-        });
+        if (reports.mpnScientificNotationMaterial.length < 20) {
+          reports.mpnScientificNotationMaterial.push({
+            ManufPartNr: mpn,
+            row_index: index + 1
+          });
+        }
+      }
+      // Detect "E+" substring (valid SKUs) - this is informative only
+      else if (countEPlusSubstring(mpn)) {
+        counters.mpnWithEPlusSubstringMaterial++;
+        if (reports.mpnWithEPlusSubstringMaterial.length < 10) {
+          reports.mpnWithEPlusSubstringMaterial.push({
+            ManufPartNr: mpn,
+            row_index: index + 1
+          });
+        }
       }
     }
   });
@@ -456,7 +520,8 @@ export function generatePrefillSummary(counters: EANPrefillExtendedCounters): st
 }
 
 /**
- * Checks if there are scientific notation warnings
+ * Checks if there are TRUE scientific notation warnings (parser coercion)
+ * This does NOT flag "E+" substrings in valid SKUs
  */
 export function hasScientificNotationWarnings(counters: EANPrefillExtendedCounters): boolean {
   return counters.mpnScientificNotationFoundMaterial > 0 || 
@@ -464,10 +529,21 @@ export function hasScientificNotationWarnings(counters: EANPrefillExtendedCounte
 }
 
 /**
- * Generates a warning message for scientific notation
+ * Generates a warning message for TRUE scientific notation (parser coercion)
+ * Only shown when actual scientific notation format is detected (e.g., 1.23E+05)
  */
 export function generateScientificNotationWarning(counters: EANPrefillExtendedCounters): string | null {
   if (!hasScientificNotationWarnings(counters)) return null;
   
-  return `⚠️ Rilevati MPN in notazione scientifica (E+). Probabile parsing numerico errato. I conflitti EAN potrebbero essere falsi. (Material: ${counters.mpnScientificNotationFoundMaterial}, Mapping: ${counters.mpnScientificNotationFoundMapping})`;
+  return `⚠️ MPN in formato scientifico (es: 1.23E+05) rilevati. Probabile coercizione numerica durante import/parsing. (Material: ${counters.mpnScientificNotationFoundMaterial}, Mapping: ${counters.mpnScientificNotationFoundMapping})`;
+}
+
+/**
+ * Generates info message for "E+" substring (valid SKUs) - NOT a warning
+ */
+export function generateEPlusSubstringInfo(counters: EANPrefillExtendedCounters): string | null {
+  const total = counters.mpnWithEPlusSubstringMaterial + counters.mpnWithEPlusSubstringMapping;
+  if (total === 0) return null;
+  
+  return `MPN con stringa "E+" (SKU validi): ${total}`;
 }
