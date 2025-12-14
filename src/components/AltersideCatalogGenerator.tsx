@@ -5800,17 +5800,17 @@ const AltersideCatalogGenerator: React.FC = () => {
           </div>
         </div>
 
-        {/* Two Column Layout */}
-        <div className="alt-grid-2">
-          {/* Left Column - Sources and Configuration */}
+        {/* Single Column Layout */}
+        <div className="space-y-8">
+          {/* Sorgenti e File Section */}
           <div className="space-y-6">
-            <h2 className="text-xl font-bold text-foreground flex items-center gap-2">
-              <Upload className="h-5 w-5 text-primary" />
-              Sorgenti e File
-            </h2>
-            
-            {/* FTP Import Button */}
-            <div className="flex justify-end">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold text-foreground flex items-center gap-2">
+                <Upload className="h-5 w-5 text-primary" />
+                Sorgenti e File
+              </h2>
+              
+              {/* FTP Import Button */}
               <Button
                 variant="outline"
                 onClick={handleFtpImport}
@@ -5831,8 +5831,8 @@ const AltersideCatalogGenerator: React.FC = () => {
               </Button>
             </div>
 
-            {/* File Upload Cards */}
-            <div className="space-y-4">
+            {/* File Upload Cards - 2x2 Grid on Desktop, 1 column on Mobile */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <FileUploadCard
                 title="Material File"
                 description="File principale con informazioni prodotto"
@@ -5872,68 +5872,60 @@ const AltersideCatalogGenerator: React.FC = () => {
             {stockLocationFileLoaded && (
               <StockLocationWarningsDisplay warnings={stockLocationWarnings} />
             )}
+          </div>
 
-            {/* Stock IT/EU Configuration */}
-            <div className="alt-card">
-              <h3 className="alt-section-title">
-                <Info className="h-5 w-5 text-primary" />
-                Configurazione Stock IT/EU
-              </h3>
-              <p className="text-sm text-muted-foreground mb-4">
-                Configura il fallback EU e i giorni di preparazione per Mediaworld ed ePrice.
-                {!stockLocationFileLoaded && (
-                  <span className="block mt-2 text-warning">
-                    Nessun file Stock Location caricato. Fallback: StockIT=ExistingStock, StockEU=0
-                  </span>
-                )}
-              </p>
-              <StockLocationConfig
-                config={extendedFeeConfig}
-                onConfigChange={handleExtendedConfigChange}
-                disabled={pipelineRunning}
-              />
-              <div className="mt-4 flex justify-end">
-                <button
-                  type="button"
-                  onClick={handleSaveExportConfig}
-                  disabled={isSavingPrepDays}
-                  className={`alt-btn-primary text-sm px-6 py-2 ${isSavingPrepDays ? 'opacity-50 cursor-not-allowed' : ''}`}
-                >
-                  {isSavingPrepDays ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin inline" />
-                      Salvataggio...
-                    </>
-                  ) : (
-                    'Salva configurazione export'
-                  )}
-                </button>
+          {/* Specifiche di Elaborazione Section */}
+          <div className="alt-card">
+            <div className="flex items-start gap-4">
+              <AlertCircle className="h-5 w-5 text-muted-foreground mt-0.5 flex-shrink-0" />
+              <div>
+                <h3 className="font-semibold text-foreground mb-2">Specifiche di Elaborazione</h3>
+                <ul className="text-sm text-muted-foreground space-y-1">
+                  <li>Filtri comuni: ExistingStock maggiore di 1, prezzi numerici validi</li>
+                  <li>Export EAN: solo record con EAN non vuoto</li>
+                  <li>Export ManufPartNr: solo record con ManufPartNr non vuoto</li>
+                  <li>Prezzi: Base + spedizione, IVA 22%, fee sequenziali configurabili</li>
+                  <li>Prezzo finale EAN: ending ,99 - ManufPartNr: arrotondamento intero superiore</li>
+                </ul>
               </div>
             </div>
           </div>
 
-          {/* Right Column - Pipeline, Export, Diagnostics */}
-          <div className="space-y-6">
-            <h2 className="text-xl font-bold text-foreground flex items-center gap-2">
-              <Activity className="h-5 w-5 text-primary" />
-              Pipeline ed Export
-            </h2>
-
-            {/* Instructions */}
-            <div className="alt-card">
-              <div className="flex items-start gap-4">
-                <AlertCircle className="h-5 w-5 text-muted-foreground mt-0.5 flex-shrink-0" />
-                <div>
-                  <h3 className="font-semibold text-foreground mb-2">Specifiche di Elaborazione</h3>
-                  <ul className="text-sm text-muted-foreground space-y-1">
-                    <li>Filtri comuni: ExistingStock maggiore di 1, prezzi numerici validi</li>
-                    <li>Export EAN: solo record con EAN non vuoto</li>
-                    <li>Export ManufPartNr: solo record con ManufPartNr non vuoto</li>
-                    <li>Prezzi: Base + spedizione, IVA 22%, fee sequenziali configurabili</li>
-                    <li>Prezzo finale EAN: ending ,99 - ManufPartNr: arrotondamento intero superiore</li>
-                  </ul>
-                </div>
-              </div>
+          {/* Stock IT/EU Configuration */}
+          <div className="alt-card">
+            <h3 className="alt-section-title">
+              <Info className="h-5 w-5 text-primary" />
+              Configurazione Stock IT/EU
+            </h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Configura il fallback EU e i giorni di preparazione per Mediaworld ed ePrice.
+              {!stockLocationFileLoaded && (
+                <span className="block mt-2 text-warning">
+                  Nessun file Stock Location caricato. Fallback: StockIT=ExistingStock, StockEU=0
+                </span>
+              )}
+            </p>
+            <StockLocationConfig
+              config={extendedFeeConfig}
+              onConfigChange={handleExtendedConfigChange}
+              disabled={pipelineRunning}
+            />
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={handleSaveExportConfig}
+                disabled={isSavingPrepDays}
+                className={`alt-btn-primary text-sm px-6 py-2 ${isSavingPrepDays ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {isSavingPrepDays ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin inline" />
+                    Salvataggio...
+                  </>
+                ) : (
+                  'Salva configurazione export'
+                )}
+              </button>
             </div>
           </div>
         </div>
