@@ -388,9 +388,17 @@ export async function buildAmazonExport(params: AmazonExportParams): Promise<Ama
   try {
     xlsmBuffer = await fetchWithRetry('/amazon/ListingLoader.xlsm');
   } catch (err) {
-    // Template not found - create from scratch
-    console.warn('[Amazon:template] Template non trovato, creazione da zero');
-    xlsmBuffer = createMinimalTemplate();
+    const errMsg = `Template ListingLoader.xlsm non trovato o non accessibile: ${err instanceof Error ? err.message : String(err)}`;
+    console.error('[Amazon:template:FATAL]', errMsg);
+    return {
+      success: false,
+      rowCount: 0,
+      discardedCount: discardedRows.length,
+      discardedRows,
+      reasonCounts,
+      diagnostics: { totalInput: eanDataset.length, exported: 0, discarded: discardedRows.length, xlsmRows: 0, txtRows: 0 },
+      error: errMsg
+    };
   }
 
   onProgress?.(60, 'Scrittura dati nel foglio Modello...');
@@ -410,18 +418,36 @@ export async function buildAmazonExport(params: AmazonExportParams): Promise<Ama
     };
   }
 
-  // Check for VBA (warn if missing, don't fail to allow template-less operation)
+  // VBA preservation is MANDATORY - fail if not present
   const hasVBA = !!(wb as any).vbaraw;
   if (!hasVBA) {
-    console.warn('[Amazon:template] Template senza VBA - il file generato sara in formato .xlsm senza macro');
+    const errMsg = 'Preservazione macro/VBA non supportata dalla libreria corrente o template privo di VBA. Impossibile generare XLSM conforme.';
+    console.error('[Amazon:template:FATAL]', errMsg);
+    return {
+      success: false,
+      rowCount: 0,
+      discardedCount: discardedRows.length,
+      discardedRows,
+      reasonCounts,
+      diagnostics: { totalInput: eanDataset.length, exported: 0, discarded: discardedRows.length, xlsmRows: 0, txtRows: 0 },
+      error: errMsg
+    };
   }
 
-  // Find or create "Modello" sheet
-  let ws = wb.Sheets['Modello'];
+  // "Modello" sheet MUST exist in template
+  const ws = wb.Sheets['Modello'];
   if (!ws) {
-    // Create sheet from scratch
-    ws = {};
-    XLSX.utils.book_append_sheet(wb, ws, 'Modello');
+    const errMsg = 'Foglio "Modello" non trovato nel template ListingLoader.xlsm. Template non conforme.';
+    console.error('[Amazon:template:FATAL]', errMsg);
+    return {
+      success: false,
+      rowCount: 0,
+      discardedCount: discardedRows.length,
+      discardedRows,
+      reasonCounts,
+      diagnostics: { totalInput: eanDataset.length, exported: 0, discarded: discardedRows.length, xlsmRows: 0, txtRows: 0 },
+      error: errMsg
+    };
   }
 
   // Clean target columns from row 7 onwards
@@ -485,8 +511,8 @@ export async function buildAmazonExport(params: AmazonExportParams): Promise<Ama
   let xlsmOut: ArrayBuffer;
   try {
     xlsmOut = XLSX.write(wb, {
-      bookType: hasVBA ? 'xlsm' : 'xlsm',
-      bookVBA: hasVBA,
+      bookType: 'xlsm',
+      bookVBA: true,
       type: 'array'
     });
   } catch (err) {
@@ -499,6 +525,26 @@ export async function buildAmazonExport(params: AmazonExportParams): Promise<Ama
       diagnostics: { totalInput: eanDataset.length, exported: 0, discarded: discardedRows.length, xlsmRows: 0, txtRows: 0 },
       error: `Errore serializzazione XLSM: ${err instanceof Error ? err.message : String(err)}`
     };
+  }
+
+  // Verify VBA is still present after write
+  try {
+    const verifyWb = XLSX.read(xlsmOut, { type: 'array', bookVBA: true });
+    if (!(verifyWb as any).vbaraw) {
+      const errMsg = 'Verifica post-write fallita: VBA perso durante serializzazione XLSM. Impossibile garantire integrità macro.';
+      console.error('[Amazon:xlsm:FATAL]', errMsg);
+      return {
+        success: false,
+        rowCount: 0,
+        discardedCount: discardedRows.length,
+        discardedRows,
+        reasonCounts,
+        diagnostics: { totalInput: eanDataset.length, exported: 0, discarded: discardedRows.length, xlsmRows: 0, txtRows: 0 },
+        error: errMsg
+      };
+    }
+  } catch (verifyErr) {
+    console.warn('[Amazon:xlsm:verify] Verifica post-write non riuscita, proseguo con cautela:', verifyErr);
   }
 
   const xlsmBlob = new Blob([xlsmOut], {
@@ -651,17 +697,26 @@ export async function buildAmazonExport(params: AmazonExportParams): Promise<Ama
 // =====================================================================
 
 export function downloadAmazonFiles(result: AmazonExportResult): void {
+  // Strict atomicity: only download if BOTH main files are present and export succeeded
+  if (!result.success || !result.xlsmBlob || !result.txtBlob) {
+    console.error('[Amazon:download:BLOCKED] Tentativo di download con risultato non valido', {
+      success: result.success,
+      hasXlsm: !!result.xlsmBlob,
+      hasTxt: !!result.txtBlob
+    });
+    return;
+  }
+
   const ts = generateTimestamp();
 
-  if (result.xlsmBlob) {
-    downloadBlob(result.xlsmBlob, `amazon_listing_loader_${ts}.xlsm`);
-  }
-  if (result.txtBlob) {
-    // Small delay to avoid browser blocking multiple downloads
-    setTimeout(() => {
-      downloadBlob(result.txtBlob!, `amazon_price_inventory_${ts}.txt`);
-    }, 500);
-  }
+  downloadBlob(result.xlsmBlob, `amazon_listing_loader_${ts}.xlsm`);
+
+  // Small delay to avoid browser blocking multiple downloads
+  setTimeout(() => {
+    downloadBlob(result.txtBlob!, `amazon_price_inventory_${ts}.txt`);
+  }, 500);
+
+  // Discarded file only on success
   if (result.discardedBlob) {
     setTimeout(() => {
       downloadBlob(result.discardedBlob!, `amazon_discarded_${ts}.xlsx`);
@@ -669,37 +724,3 @@ export function downloadAmazonFiles(result: AmazonExportResult): void {
   }
 }
 
-// =====================================================================
-// MINIMAL TEMPLATE CREATOR (fallback when ListingLoader.xlsm not available)
-// =====================================================================
-
-function createMinimalTemplate(): ArrayBuffer {
-  const wb = XLSX.utils.book_new();
-  const ws: XLSX.WorkSheet = {};
-
-  // Create minimal header structure (rows 1-6)
-  // Row 1: Title
-  ws[XLSX.utils.encode_cell({ r: 0, c: 0 })] = { t: 's', v: 'Amazon ListingLoader - Modello' };
-  // Rows 2-5: Instructions/headers (left empty for compatibility)
-  // Row 6: Column headers
-  const headers: Record<number, string> = {
-    [COL.A]: 'sku',
-    [COL.B]: 'external-product-id-type',
-    [COL.C]: 'external-product-id',
-    [COL.H]: 'condition-type',
-    [COL.AF]: 'merchant-shipping-group',
-    [COL.AG]: 'quantity',
-    [COL.AH]: 'fulfillment-latency',
-    [COL.AK]: 'standard-price',
-    [COL.BJ]: 'merchant-shipping-group-name',
-  };
-
-  for (const [col, header] of Object.entries(headers)) {
-    ws[XLSX.utils.encode_cell({ r: 5, c: Number(col) })] = { t: 's', v: header };
-  }
-
-  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 6, c: COL.BJ } });
-
-  XLSX.utils.book_append_sheet(wb, ws, 'Modello');
-  return XLSX.write(wb, { bookType: 'xlsm', type: 'array' });
-}
