@@ -325,7 +325,8 @@ export async function buildAmazonExport(params: AmazonExportParams): Promise<Ama
     if (record.__overrideStockEU != null) stockEU = Number(record.__overrideStockEU);
 
     // Override exclusion: both StockIT and StockEU present in override and sum = 0
-    if (record.__override && record.__overrideStockIT != null && record.__overrideStockEU != null &&
+    // CRITICAL: Do NOT guard on __override flag — check only presence of both override stock fields
+    if (record.__overrideStockIT != null && record.__overrideStockEU != null &&
         (Number(record.__overrideStockIT) + Number(record.__overrideStockEU)) === 0) {
       discardedRows.push({
         SKU: sku,
