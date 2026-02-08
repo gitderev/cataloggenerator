@@ -446,7 +446,7 @@ export async function buildAmazonExport(params: AmazonExportParams): Promise<Ama
   try {
     xlsmBuffer = await fetchXlsmTemplate();
   } catch (err) {
-    const errMsg = `Template ListingLoader.xlsm non trovato o non accessibile: ${err instanceof Error ? err.message : String(err)}`;
+    const errMsg = `Template ListingLoader.xlsm non trovato o non accessibile. Aggiungere il file ufficiale Amazon in public/amazon/ListingLoader.xlsm e verificare che sia servito a /amazon/ListingLoader.xlsm. Dettaglio: ${err instanceof Error ? err.message : String(err)}`;
     console.error('[Amazon:template:FATAL]', errMsg);
     return {
       success: false,
