@@ -30,6 +30,7 @@ export function forceEANText(ws: XLSX.WorkSheet, headerRowIndex = 0): void {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- accepts any array of objects for XLSX serialization
 export function exportDiscardedRowsCSV(discarded: any[], filename: string = 'righe_scartate_EAN'): void {
   if (discarded.length === 0) return;
   

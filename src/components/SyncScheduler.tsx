@@ -247,7 +247,7 @@ export const SyncScheduler: React.FC = () => {
       setRuns((runsData || []) as unknown as SyncRun[]);
 
       // Trova run in stato running
-      const running = (runsData || []).find((r: any) => r.status === 'running');
+      const running = (runsData || []).find((r: Record<string, unknown>) => r.status === 'running');
       
       if (running) {
         // Controlla se è una run "zombie" (in running da più di 15 minuti)
@@ -266,7 +266,7 @@ export const SyncScheduler: React.FC = () => {
         setIsStaleRun(false);
       }
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error loading sync data:', error);
       toast({
         title: 'Errore',
@@ -301,7 +301,7 @@ export const SyncScheduler: React.FC = () => {
         title: 'Salvato',
         description: 'Configurazione aggiornata'
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error saving config:', error);
       toast({
         title: 'Errore',
@@ -351,11 +351,11 @@ export const SyncScheduler: React.FC = () => {
 
       await loadData();
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error starting sync:', error);
       toast({
         title: 'Errore',
-        description: error.message || 'Impossibile avviare la sincronizzazione',
+        description: (error instanceof Error ? error.message : null) || 'Impossibile avviare la sincronizzazione',
         variant: 'destructive'
       });
     } finally {
@@ -397,11 +397,11 @@ export const SyncScheduler: React.FC = () => {
 
       await loadData();
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error stopping sync:', error);
       toast({
         title: 'Errore',
-        description: error.message || 'Impossibile interrompere la sincronizzazione',
+        description: (error instanceof Error ? error.message : null) || 'Impossibile interrompere la sincronizzazione',
         variant: 'destructive'
       });
     } finally {
@@ -442,11 +442,11 @@ export const SyncScheduler: React.FC = () => {
 
       await loadData();
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error resetting sync:', error);
       toast({
         title: 'Errore',
-        description: error.message || 'Impossibile resettare la sincronizzazione',
+        description: (error instanceof Error ? error.message : null) || 'Impossibile resettare la sincronizzazione',
         variant: 'destructive'
       });
     } finally {

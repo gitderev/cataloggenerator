@@ -53,6 +53,7 @@ export function normalizeEAN(raw: unknown): EANResult {
   return { ok: false, reason: `EAN lunghezza ${compact.length} non valida`, original };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic row data from parsed CSV/XLSX; full typing requires project-wide DataRow refactor
 export function filterAndNormalizeForEAN(
   rows: any[],
   computeFinalPrice: (row: any) => number

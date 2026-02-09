@@ -2,7 +2,7 @@ import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 
 export interface ParsedTXT {
-  data: any[];
+  data: Record<string, unknown>[];
   headers: string[];
 }
 
@@ -46,7 +46,7 @@ export const parseTXT = (file: File): Promise<ParsedTXT> => {
             return;
           }
           
-          const data = results.data as any[];
+          const data = results.data as Record<string, unknown>[];
           const headers = Object.keys(data[0] || {});
           
           // Post-parse integrity check
@@ -73,18 +73,18 @@ export const parseTXT = (file: File): Promise<ParsedTXT> => {
 };
 
 export const mergeMultipleTXTData = (
-  materialData: any[],
-  additionalFiles: { data: any[]; skuColumn: string; fileName: string }[]
-): any[] => {
-  const mergedData: any[] = [];
+  materialData: Record<string, unknown>[],
+  additionalFiles: { data: Record<string, unknown>[]; skuColumn: string; fileName: string }[]
+): Record<string, unknown>[] => {
+  const mergedData: Record<string, unknown>[] = [];
   
   // Create maps for each additional file
   const fileMaps = additionalFiles.map(file => {
-    const map = new Map();
+    const map = new Map<string, Record<string, unknown>>();
     file.data.forEach(row => {
       const sku = row[file.skuColumn];
       if (sku) {
-        map.set(sku.toString().trim(), row);
+        map.set(String(sku).trim(), row);
       }
     });
     return { map, fileName: file.fileName };
@@ -95,8 +95,8 @@ export const mergeMultipleTXTData = (
     const materialSku = materialRow['SKU'] || materialRow['sku'] || materialRow['Sku'] || Object.values(materialRow)[0];
     if (!materialSku) return;
     
-    const skuKey = materialSku.toString().trim();
-    const mergedRow: any = { ...materialRow };
+    const skuKey = String(materialSku).trim();
+    const mergedRow: Record<string, unknown> = { ...materialRow };
     
     // Add data from each additional file
     fileMaps.forEach(({ map, fileName }, index) => {
@@ -104,7 +104,7 @@ export const mergeMultipleTXTData = (
       if (additionalRow) {
         Object.keys(additionalRow).forEach(key => {
           // Avoid overwriting existing columns, prefix with file identifier
-          const newKey = mergedRow.hasOwnProperty(key) && key !== additionalFiles[index].skuColumn
+          const newKey = Object.prototype.hasOwnProperty.call(mergedRow, key) && key !== additionalFiles[index].skuColumn
             ? `${fileName}_${key}`
             : key;
           mergedRow[newKey] = additionalRow[key];
@@ -118,7 +118,7 @@ export const mergeMultipleTXTData = (
   return mergedData;
 };
 
-export const exportToExcel = (data: any[], filename: string = 'merged_data'): void => {
+export const exportToExcel = (data: Record<string, unknown>[], filename: string = 'merged_data'): void => {
   const worksheet = XLSX.utils.json_to_sheet(data);
   const workbook = XLSX.utils.book_new();
   
