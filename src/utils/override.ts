@@ -773,7 +773,7 @@ export function validateEnding99Guard(catalog: Record<string, unknown>[]): {
     if (cents !== 99) {
       failures.push({
         index: i,
-        ean: record.EAN || 'N/A',
+        ean: String(record.EAN || 'N/A'),
         price: String(prezzoFinale)
       });
     }

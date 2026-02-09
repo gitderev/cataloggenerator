@@ -271,7 +271,7 @@ export async function buildAmazonExport(params: AmazonExportParams): Promise<Ama
   for (let i = 0; i < eanDataset.length; i++) {
     const record = eanDataset[i];
     const sku = sanitizeSKU(String(record.ManufPartNr || '').trim());
-    const rawEAN = record.EAN ?? '';
+    const rawEAN = String(record.EAN ?? '');
     const matnr = String(record.Matnr || '');
     const existingStock = Number(record.ExistingStock) || 0;
 
