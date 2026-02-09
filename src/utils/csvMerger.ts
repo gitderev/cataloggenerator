@@ -2,7 +2,7 @@ import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 
 export interface ParsedCSV {
-  data: any[];
+  data: Record<string, unknown>[];
   headers: string[];
 }
 
@@ -20,7 +20,7 @@ export const parseCSV = (file: File): Promise<ParsedCSV> => {
           return;
         }
         
-        const data = results.data as any[];
+        const data = results.data as Record<string, unknown>[];
         const headers = Object.keys(data[0] || {});
         
         // Post-parse integrity check
@@ -43,13 +43,13 @@ export const parseCSV = (file: File): Promise<ParsedCSV> => {
 };
 
 export const mergeCSVData = (
-  data1: any[],
-  data2: any[],
+  data1: Record<string, unknown>[],
+  data2: Record<string, unknown>[],
   skuColumn1: string,
   skuColumn2: string
-): any[] => {
-  const mergedData: any[] = [];
-  const data2Map = new Map();
+): Record<string, unknown>[] => {
+  const mergedData: Record<string, unknown>[] = [];
+  const data2Map = new Map<unknown, Record<string, unknown>>();
   
   // Crea una mappa dei dati del secondo file usando il SKU come chiave
   data2.forEach(row => {
@@ -68,7 +68,7 @@ export const mergeCSVData = (
     
     if (row2) {
       // Merge delle righe - rinomina le colonne duplicate
-      const mergedRow: any = {};
+      const mergedRow: Record<string, unknown> = {};
       
       // Aggiungi colonne dal primo file
       Object.keys(row1).forEach(key => {
@@ -90,7 +90,7 @@ export const mergeCSVData = (
       data2Map.delete(sku); // Rimuovi per evitare duplicati
     } else {
       // SKU presente solo nel primo file
-      const mergedRow: any = { SKU: sku };
+      const mergedRow: Record<string, unknown> = { SKU: sku };
       Object.keys(row1).forEach(key => {
         mergedRow[`File1_${key}`] = row1[key];
       });
@@ -100,7 +100,7 @@ export const mergeCSVData = (
   
   // Aggiungi le righe del secondo file che non hanno match
   data2Map.forEach((row2, sku) => {
-    const mergedRow: any = { SKU: sku };
+    const mergedRow: Record<string, unknown> = { SKU: sku };
     Object.keys(row2).forEach(key => {
       mergedRow[`File2_${key}`] = row2[key];
     });
@@ -110,7 +110,7 @@ export const mergeCSVData = (
   return mergedData;
 };
 
-export const exportToExcel = (data: any[], filename: string = 'merged_data'): void => {
+export const exportToExcel = (data: Record<string, unknown>[], filename: string = 'merged_data'): void => {
   const worksheet = XLSX.utils.json_to_sheet(data);
   const workbook = XLSX.utils.book_new();
   

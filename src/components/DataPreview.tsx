@@ -4,7 +4,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 interface DataPreviewProps {
-  data: any[];
+  data: Record<string, unknown>[];
   title: string;
   maxRows?: number;
 }
@@ -44,7 +44,7 @@ export const DataPreview: React.FC<DataPreviewProps> = ({
               <TableRow key={rowIndex}>
                 {headers.map((header, colIndex) => (
                   <TableCell key={colIndex} className="text-sm">
-                    {row[header] || '-'}
+                    {String(row[header] ?? '-')}
                   </TableCell>
                 ))}
               </TableRow>
