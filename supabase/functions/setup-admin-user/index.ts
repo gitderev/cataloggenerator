@@ -127,7 +127,7 @@ serve(async (req) => {
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
 
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Setup error:", error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),

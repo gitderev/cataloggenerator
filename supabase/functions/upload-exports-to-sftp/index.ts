@@ -432,7 +432,7 @@ serve(async (req) => {
         try {
           conn.end();
           console.log('[upload-exports-to-sftp] SSH connection closed');
-        } catch (e) { /* ignore */ }
+        } catch (_e: unknown) { /* ignore */ }
       }
     }
 

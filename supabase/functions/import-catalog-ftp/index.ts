@@ -515,7 +515,7 @@ serve(async (req) => {
         
         // Download the selected file
         fileBuffer = await client.downloadFile(selectedFilename);
-      } catch (e) {
+    } catch (e: unknown) {
         const errMsg = e instanceof Error ? e.message : String(e);
         console.error(`[import-catalog-ftp] Stock location download failed: ${errMsg}`);
         await client.close();
@@ -595,7 +595,7 @@ serve(async (req) => {
     try {
       console.log(`[import-catalog-ftp] Starting download of ${config.ftpName}...`);
       fileBuffer = await client.downloadFile(config.ftpName);
-    } catch (e) {
+    } catch (e: unknown) {
       const errMsg = e instanceof Error ? e.message : String(e);
       console.error(`[import-catalog-ftp] Download failed: ${errMsg}`);
       if (errMsg.includes("not found")) {
@@ -668,7 +668,7 @@ serve(async (req) => {
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
-  } catch (e) {
+  } catch (e: unknown) {
     console.error("[import-catalog-ftp] Error:", e);
     const errMsg = e instanceof Error ? e.message : String(e);
     
