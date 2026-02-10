@@ -366,7 +366,7 @@ serve(async (req) => {
     if (runId && supabase) {
       try {
         await finalizeRun(supabase, runId, 'failed', startTime, errMsg(err));
-      } catch (e) {
+      } catch (e: unknown) {
         console.error('[orchestrator] Failed to finalize:', e);
       }
     }

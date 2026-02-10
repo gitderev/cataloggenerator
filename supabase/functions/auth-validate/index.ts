@@ -103,7 +103,7 @@ async function validateToken(token: string, secret: string): Promise<boolean> {
     const signatureValid = timeSafeCompare(providedSignature, expectedSignatureHex);
     
     return signatureValid && status === 'authenticated';
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Token validation error:', error);
     return false;
   }
@@ -151,7 +151,7 @@ serve(async (req) => {
       JSON.stringify({ valid: isValid }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Error in auth-validate:', error);
     return new Response(
       JSON.stringify({ valid: false }),

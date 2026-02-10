@@ -200,7 +200,7 @@ async function updateLocationWarnings(supabase: SupabaseClient, runId: string, w
   try {
     await supabase.from('sync_runs').update({ location_warnings: warnings }).eq('id', runId);
     console.log(`[sync-step-runner] Updated location_warnings for run ${runId}:`, warnings);
-  } catch (e) {
+  } catch (e: unknown) {
     console.error(`[sync-step-runner] Failed to update location_warnings:`, e);
   }
 }
@@ -371,7 +371,7 @@ async function deleteFromStorage(supabase: SupabaseClient, bucket: string, path:
   try {
     await supabase.storage.from(bucket).remove([path]);
     console.log(`[storage] Deleted ${bucket}/${path}`);
-  } catch (e) {
+  } catch (e: unknown) {
     console.log(`[storage] Failed to delete ${bucket}/${path}:`, e);
   }
 }
