@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,11 +15,15 @@ export default function Login() {
   const [isSettingUp, setIsSettingUp] = useState(false);
   const { login, isAuthenticated } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { toast } = useToast();
+
+  const nextParam = searchParams.get('next');
+  const safeNext = nextParam && nextParam.startsWith('/') && !nextParam.startsWith('//') ? nextParam : '/';
 
   // Redirect if already authenticated
   if (isAuthenticated) {
-    navigate('/', { replace: true });
+    navigate(safeNext, { replace: true });
     return null;
   }
 
@@ -40,7 +44,7 @@ export default function Login() {
     const result = await login(password);
     
     if (result.success) {
-      navigate('/', { replace: true });
+      navigate(safeNext, { replace: true });
     } else {
       toast({
         title: 'Accesso negato',
