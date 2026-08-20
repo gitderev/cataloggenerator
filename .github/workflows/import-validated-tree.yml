@@ -1,0 +1,40 @@
+name: Import validated production tree
+
+on:
+  push:
+    branches:
+      - migration/validated-prod-20260820
+
+permissions:
+  contents: write
+
+jobs:
+  import-tree:
+    if: github.event.head_commit.message != 'Import validated production tree'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout migration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import exact validated production tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA='8f31695f6ef20088e543bdc1517b1b9646494e41'
+          git fetch --no-tags https://github.com/gitderev/alterside-catalog-client-side-dev.git "$SOURCE_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$SOURCE_SHA"
+          git read-tree --reset -u FETCH_HEAD
+
+          grep -q 'VITE_SUPABASE_PROJECT_ID="hdcniibdblgqkhhgbqtz"' .env
+          grep -q 'VITE_SUPABASE_URL="https://hdcniibdblgqkhhgbqtz.supabase.co"' .env
+          grep -q 'project_id = "hdcniibdblgqkhhgbqtz"' supabase/config.toml
+          grep -q "https://catalogclientside.lovable.app" supabase/functions/_shared/automationTemplates.ts
+          ! grep -q 'oekbiinjgxaabweximws' .env
+          ! grep -q 'oekbiinjgxaabweximws' supabase/config.toml
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Import validated production tree'
+          git push origin HEAD:migration/validated-prod-20260820
