@@ -4,19 +4,29 @@ on:
   push:
     branches:
       - migration/validated-prod-20260820
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
 
 permissions:
   contents: write
 
 jobs:
   import-tree:
-    if: github.event.head_commit.message != 'Import validated production tree'
+    if: >-
+      (github.event_name == 'push' && github.event.head_commit.message != 'Import validated production tree') ||
+      (github.event_name == 'pull_request' && github.head_ref == 'migration/validated-prod-20260820')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout migration branch
+      - name: Checkout migration branch head
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Import exact validated production tree
         shell: bash
